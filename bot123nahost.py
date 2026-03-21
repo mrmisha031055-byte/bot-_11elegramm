@@ -1,8 +1,9 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 2.4
+Версия: 2.5
 Дата: 2026-03-22
-Исправлены проблемы сброса и синхронизации данных
+Исправлены проблемы с кэшированием данных
+Все функции используют прямые запросы к БД
 """
 
 import asyncio
@@ -99,67 +100,44 @@ def init_db():
     conn.commit()
     logger.info("База данных инициализирована")
 
-@async_wrapper
-def add_user(user_id: int, username: str, first_name: str):
-    """Добавление нового пользователя"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT OR IGNORE INTO users (user_id, username, first_name, start_date, current_day) VALUES (?, ?, ?, ?, ?)",
-        (user_id, username, first_name, datetime.now().isoformat(), 1)
-    )
-    conn.commit()
-
-@async_wrapper
-def get_user(user_id: int) -> Optional[Tuple]:
-    """Получение данных пользователя"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    return cur.fetchone()
-
+# Функции с прямыми запросами к БД (без кэширования)
 def get_user_direct(user_id: int) -> Optional[Tuple]:
-    """Прямое получение данных пользователя без обертки"""
+    """Прямое получение данных пользователя из БД"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
     return cur.fetchone()
 
-@async_wrapper
-def update_user_day(user_id: int, day: int):
-    """Обновление текущего дня пользователя"""
+def update_user_day_direct(user_id: int, day: int):
+    """Прямое обновление текущего дня пользователя"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("UPDATE users SET current_day = ? WHERE user_id = ?", (day, user_id))
     conn.commit()
 
-@async_wrapper
-def update_last_task_date(user_id: int):
-    """Обновление даты последней отправки задач"""
+def update_last_task_date_direct(user_id: int):
+    """Прямое обновление даты последней отправки задач"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("UPDATE users SET last_task_date = ? WHERE user_id = ?", (datetime.now().isoformat(), user_id))
     conn.commit()
 
-@async_wrapper
-def update_last_report_date(user_id: int):
-    """Обновление даты последнего отчета"""
+def update_last_report_date_direct(user_id: int):
+    """Прямое обновление даты последнего отчета"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("UPDATE users SET last_report_date = ? WHERE user_id = ?", (datetime.now().isoformat(), user_id))
     conn.commit()
 
-@async_wrapper
-def complete_marathon(user_id: int):
-    """Отметить пользователя как завершившего марафон"""
+def complete_marathon_direct(user_id: int):
+    """Прямое обновление статуса завершения марафона"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("UPDATE users SET completed_30 = 1, is_active = 0 WHERE user_id = ?", (user_id,))
     conn.commit()
 
-@async_wrapper
-def save_report(user_id: int, day: int, completed: int, total: int, status: str):
-    """Сохранение отчета за день"""
+def save_report_direct(user_id: int, day: int, completed: int, total: int, status: str):
+    """Прямое сохранение отчета за день"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -168,25 +146,22 @@ def save_report(user_id: int, day: int, completed: int, total: int, status: str)
     )
     conn.commit()
 
-@async_wrapper
-def get_report_status(user_id: int, day: int) -> bool:
-    """Проверка, отправлял ли пользователь отчет за день"""
+def get_report_status_direct(user_id: int, day: int) -> bool:
+    """Прямая проверка, отправлял ли пользователь отчет за день"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT id FROM daily_reports WHERE user_id = ? AND day = ?", (user_id, day))
     return cur.fetchone() is not None
 
-@async_wrapper
-def get_all_active_users() -> list:
-    """Получение всех активных пользователей"""
+def get_all_active_users_direct() -> list:
+    """Прямое получение всех активных пользователей"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT user_id, current_day FROM users WHERE is_active = 1 AND completed_30 = 0")
     return cur.fetchall()
 
-@async_wrapper
-def get_all_users_for_admin() -> list:
-    """Получение всех пользователей для админ-панели"""
+def get_all_users_for_admin_direct() -> list:
+    """Прямое получение всех пользователей для админ-панели"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
@@ -196,9 +171,8 @@ def get_all_users_for_admin() -> list:
     """)
     return cur.fetchall()
 
-@async_wrapper
-def reset_user_progress(user_id: int):
-    """Полный сброс прогресса пользователя"""
+def reset_user_progress_direct(user_id: int):
+    """Прямой полный сброс прогресса пользователя"""
     conn = get_db()
     cur = conn.cursor()
     
@@ -217,13 +191,39 @@ def reset_user_progress(user_id: int):
     conn.commit()
     logger.info(f"Прогресс пользователя {user_id} полностью сброшен")
 
-@async_wrapper
-def get_user_reports(user_id: int) -> list:
-    """Получение всех отчетов пользователя"""
+def get_user_reports_direct(user_id: int) -> list:
+    """Прямое получение всех отчетов пользователя"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT day, status, report_date, tasks_completed, total_tasks FROM daily_reports WHERE user_id = ? ORDER BY day", (user_id,))
     return cur.fetchall()
+
+def add_user_direct(user_id: int, username: str, first_name: str):
+    """Прямое добавление нового пользователя"""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR IGNORE INTO users (user_id, username, first_name, start_date, current_day) VALUES (?, ?, ?, ?, ?)",
+        (user_id, username, first_name, datetime.now().isoformat(), 1)
+    )
+    conn.commit()
+
+# Обертки для асинхронного вызова (для фоновых задач)
+@async_wrapper
+def get_all_active_users_async():
+    return get_all_active_users_direct()
+
+@async_wrapper
+def get_report_status_async(user_id, day):
+    return get_report_status_direct(user_id, day)
+
+@async_wrapper
+def update_user_day_async(user_id, day):
+    return update_user_day_direct(user_id, day)
+
+@async_wrapper
+def update_last_task_date_async(user_id):
+    return update_last_task_date_direct(user_id)
 
 # ==================== КОНТЕНТ (ТЕКСТЫ) ====================
 
@@ -909,11 +909,12 @@ dp.callback_query.middleware(ThrottlingMiddleware(rate_limit=0.5))
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    """Обработка команды /start"""
+    """Обработка команды /start - использует прямой запрос к БД"""
     user = message.from_user
     start_time = asyncio.get_event_loop().time()
     
-    await add_user(user.id, user.username, user.first_name)
+    # Прямое добавление/обновление пользователя
+    add_user_direct(user.id, user.username, user.first_name)
     user_data = get_user_direct(user.id)
     
     if not user_data:
@@ -925,6 +926,7 @@ async def cmd_start(message: types.Message):
     
     logger.info(f"Пользователь {user.id}: день={current_day}, completed_30={completed_30}")
     
+    # Автоматическое исправление несоответствий
     if completed_30 == 1:
         conn = get_db()
         cur = conn.cursor()
@@ -936,7 +938,6 @@ async def cmd_start(message: types.Message):
             cur.execute("UPDATE users SET completed_30 = 0, is_active = 1 WHERE user_id = ?", (user.id,))
             conn.commit()
             completed_30 = 0
-            current_day = 1
     
     if completed_30 == 1:
         await message.answer(
@@ -949,7 +950,7 @@ async def cmd_start(message: types.Message):
         return
     
     if current_day > 1:
-        has_report = await get_report_status(user.id, current_day)
+        has_report = get_report_status_direct(user.id, current_day)
         
         if has_report:
             status = "✅ Ты уже отчитался за сегодня. Готов к следующему дню?"
@@ -975,21 +976,24 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command("my_status"))
 async def my_status_command(message: types.Message):
-    """Команда для просмотра своего статуса с прямым запросом к БД"""
+    """Команда для просмотра своего статуса - использует прямой запрос к БД"""
     user_id = message.from_user.id
     
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    user_data = cur.fetchone()
+    # Прямой запрос к БД
+    user_data = get_user_direct(user_id)
     
     if not user_data:
         await message.answer("❌ Вы не зарегистрированы. Нажмите /start")
         return
     
+    conn = get_db()
+    cur = conn.cursor()
+    
+    # Получаем количество отчетов
     cur.execute("SELECT COUNT(*) FROM daily_reports WHERE user_id = ?", (user_id,))
     reports_count = cur.fetchone()[0]
     
+    # Получаем последний отчет
     cur.execute("SELECT day, status, report_date FROM daily_reports WHERE user_id = ? ORDER BY day DESC LIMIT 1", (user_id,))
     last_report = cur.fetchone()
     
@@ -1008,6 +1012,7 @@ async def my_status_command(message: types.Message):
         has_today = cur.fetchone() is not None
         status_text += f"📋 *Отчет за сегодня:* {'Отправлен' if has_today else 'Не отправлен'}\n"
     
+    # Проверка на несоответствия
     if user_data[7] == 1 and reports_count == 0:
         status_text += f"\n⚠️ *Обнаружено несоответствие!*\n"
         status_text += f"Флаг завершения установлен, но нет ни одного отчета.\n"
@@ -1026,17 +1031,17 @@ async def get_info(message: types.Message):
 
 @dp.message(F.text == "✅ Я ГОТОВ")
 async def i_am_ready(message: types.Message):
-    """Обработка кнопки готовности"""
+    """Обработка кнопки готовности - использует прямые запросы к БД"""
     user_id = message.from_user.id
     start_time = asyncio.get_event_loop().time()
     
-    user = await get_user(user_id)
-    if not user:
+    user_data = get_user_direct(user_id)
+    if not user_data:
         await message.answer("Произошла ошибка. Нажми /start")
         return
     
-    current_day = user[4]
-    completed_30 = user[7]
+    current_day = user_data[4]
+    completed_30 = user_data[7]
     
     if completed_30 == 1:
         await message.answer(
@@ -1048,12 +1053,12 @@ async def i_am_ready(message: types.Message):
         )
         return
     
-    has_report = await get_report_status(user_id, current_day)
+    has_report = get_report_status_direct(user_id, current_day)
     
     if has_report:
         next_day = current_day + 1
         if next_day <= 30:
-            await update_user_day(user_id, next_day)
+            update_user_day_direct(user_id, next_day)
             day_tasks = DAILY_TASKS[next_day]
             tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
             tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
@@ -1063,9 +1068,9 @@ async def i_am_ready(message: types.Message):
                 parse_mode="Markdown",
                 reply_markup=get_report_keyboard(next_day)
             )
-            await update_last_task_date(user_id)
+            update_last_task_date_direct(user_id)
         else:
-            await complete_marathon(user_id)
+            complete_marathon_direct(user_id)
             await message.answer(FINAL_MESSAGE, parse_mode="Markdown")
             await message.answer(
                 "🎉 *Марафон завершен!*\n\n"
@@ -1083,32 +1088,32 @@ async def i_am_ready(message: types.Message):
             parse_mode="Markdown",
             reply_markup=get_report_keyboard(current_day)
         )
-        await update_last_task_date(user_id)
+        update_last_task_date_direct(user_id)
     
     logger.info(f"Я готов для {user_id} обработан за {asyncio.get_event_loop().time() - start_time:.2f} сек")
 
 @dp.callback_query(lambda c: c.data.startswith('report_'))
 async def process_report(callback: types.CallbackQuery):
-    """Обработка отчетов"""
+    """Обработка отчетов - использует прямые запросы к БД"""
     user_id = callback.from_user.id
     report = callback.data.replace('report_', '')
     start_time = asyncio.get_event_loop().time()
     
-    user = await get_user(user_id)
-    if not user:
+    user_data = get_user_direct(user_id)
+    if not user_data:
         await callback.message.answer("Произошла ошибка. Нажми /start")
         await callback.answer()
         return
     
-    current_day = user[4]
+    current_day = user_data[4]
     
-    if not user[5]:
+    if not user_data[5]:
         await callback.answer("Сначала нажми «✅ Я ГОТОВ», чтобы получить задачи!", show_alert=True)
         return
     
     total_tasks = DAILY_TASKS[current_day]["total"]
     
-    if await get_report_status(user_id, current_day):
+    if get_report_status_direct(user_id, current_day):
         await callback.answer("Ты уже отчитался за этот день!", show_alert=True)
         return
     
@@ -1121,8 +1126,8 @@ async def process_report(callback: types.CallbackQuery):
     
     completed = completed_map.get(report, 0)
     
-    await save_report(user_id, current_day, completed, total_tasks, report)
-    await update_last_report_date(user_id)
+    save_report_direct(user_id, current_day, completed, total_tasks, report)
+    update_last_report_date_direct(user_id)
     
     feedback = FEEDBACK_MESSAGES[current_day].get(report, "Спасибо за отчет!")
     await callback.message.answer(feedback, parse_mode="Markdown")
@@ -1131,7 +1136,7 @@ async def process_report(callback: types.CallbackQuery):
         await callback.message.answer(SUPPORT_MESSAGES[current_day], parse_mode="Markdown")
     
     if current_day == 30:
-        await complete_marathon(user_id)
+        complete_marathon_direct(user_id)
         await callback.message.answer(FINAL_MESSAGE, parse_mode="Markdown")
         await callback.message.answer(
             "🎉 *Марафон завершен!*\n\n"
@@ -1143,7 +1148,7 @@ async def process_report(callback: types.CallbackQuery):
         return
     
     next_day = current_day + 1
-    await update_user_day(user_id, next_day)
+    update_user_day_direct(user_id, next_day)
     
     day_tasks = DAILY_TASKS[next_day]
     tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
@@ -1155,7 +1160,7 @@ async def process_report(callback: types.CallbackQuery):
         reply_markup=get_report_keyboard(next_day)
     )
     
-    await update_last_task_date(user_id)
+    update_last_task_date_direct(user_id)
     
     logger.info(f"Отчет от {user_id} за день {current_day} обработан за {asyncio.get_event_loop().time() - start_time:.2f} сек")
     await callback.answer()
@@ -1168,7 +1173,7 @@ async def admin_command(message: types.Message):
         await message.answer("❌ У вас нет доступа к этой команде.")
         return
     
-    users = await get_all_users_for_admin()
+    users = get_all_users_for_admin_direct()
     
     if not users:
         await message.answer("📊 *Нет пользователей*", parse_mode="Markdown")
@@ -1205,7 +1210,7 @@ async def admin_command(message: types.Message):
 
 @dp.message(Command("admin_reset"))
 async def admin_reset_user(message: types.Message):
-    """Сброс пользователя на 1-й день (админ-команда)"""
+    """Сброс пользователя на 1-й день"""
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ У вас нет доступа к этой команде.")
         return
@@ -1222,12 +1227,12 @@ async def admin_reset_user(message: types.Message):
     try:
         user_id = int(args[1])
         
-        user = await get_user(user_id)
+        user = get_user_direct(user_id)
         if not user:
             await message.answer(f"❌ Пользователь с ID {user_id} не найден.")
             return
         
-        await reset_user_progress(user_id)
+        reset_user_progress_direct(user_id)
         
         await message.answer(
             f"✅ *Прогресс пользователя сброшен*\n\n"
@@ -1246,16 +1251,15 @@ async def admin_reset_user(message: types.Message):
                 "Нажмите /start для начала.",
                 parse_mode="Markdown"
             )
-            logger.info(f"Уведомление о сбросе отправлено пользователю {user_id}")
         except Exception as e:
-            logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+            logger.error(f"Не удалось отправить уведомление: {e}")
             
     except ValueError:
         await message.answer("❌ Неверный ID пользователя.")
 
 @dp.message(Command("admin_force_reset"))
 async def admin_force_reset_user(message: types.Message):
-    """Принудительный полный сброс пользователя (админ-команда)"""
+    """Принудительный полный сброс пользователя"""
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ У вас нет доступа к этой команде.")
         return
@@ -1264,8 +1268,7 @@ async def admin_force_reset_user(message: types.Message):
     if len(args) < 2:
         await message.answer(
             "❌ *Использование:* `/admin_force_reset user_id`\n"
-            "Пример: `/admin_force_reset 123456789`\n\n"
-            "⚠️ *Эта команда полностью удаляет все данные пользователя и сбрасывает прогресс*",
+            "Пример: `/admin_force_reset 123456789`",
             parse_mode="Markdown"
         )
         return
@@ -1273,7 +1276,7 @@ async def admin_force_reset_user(message: types.Message):
     try:
         user_id = int(args[1])
         
-        user = await get_user(user_id)
+        user = get_user_direct(user_id)
         if not user:
             await message.answer(f"❌ Пользователь с ID {user_id} не найден.")
             return
@@ -1294,23 +1297,13 @@ async def admin_force_reset_user(message: types.Message):
         """, (datetime.now().isoformat(), user_id))
         
         cur.execute("UPDATE users SET completed_30 = 0 WHERE user_id = ?", (user_id,))
-        
         conn.commit()
-        
-        cur.execute("SELECT completed_30, current_day FROM users WHERE user_id = ?", (user_id,))
-        result = cur.fetchone()
-        
-        if result and result[0] == 1:
-            cur.execute("UPDATE users SET completed_30 = 0 WHERE user_id = ?", (user_id,))
-            conn.commit()
         
         await message.answer(
             f"✅ *Принудительный полный сброс выполнен*\n\n"
             f"👤 ID: {user_id}\n"
             f"📝 Имя: {user[2] or user[1] or 'Не указано'}\n"
-            f"🔄 Все данные очищены, пользователь сброшен на день 1\n"
-            f"✅ Флаг завершения марафона сброшен\n\n"
-            f"⚠️ Пользователь теперь может начать марафон заново",
+            f"🔄 Все данные очищены, пользователь сброшен на день 1",
             parse_mode="Markdown"
         )
         
@@ -1322,16 +1315,15 @@ async def admin_force_reset_user(message: types.Message):
                 "Нажмите /start для начала.",
                 parse_mode="Markdown"
             )
-            logger.info(f"Уведомление о принудительном сбросе отправлено пользователю {user_id}")
         except Exception as e:
-            logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+            logger.error(f"Не удалось отправить уведомление: {e}")
             
     except ValueError:
         await message.answer("❌ Неверный ID пользователя.")
 
 @dp.message(Command("admin_set_day"))
 async def admin_set_user_day(message: types.Message):
-    """Установка конкретного дня для пользователя (админ-команда)"""
+    """Установка конкретного дня для пользователя"""
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ У вас нет доступа к этой команде.")
         return
@@ -1354,14 +1346,14 @@ async def admin_set_user_day(message: types.Message):
             await message.answer("❌ День должен быть от 1 до 30.")
             return
         
-        user = await get_user(user_id)
+        user = get_user_direct(user_id)
         if not user:
             await message.answer(f"❌ Пользователь с ID {user_id} не найден.")
             return
         
         old_day = user[4]
         
-        await update_user_day(user_id, new_day)
+        update_user_day_direct(user_id, new_day)
         
         if user[7] == 1:
             conn = get_db()
@@ -1382,20 +1374,18 @@ async def admin_set_user_day(message: types.Message):
             await bot.send_message(
                 user_id,
                 f"🔄 *Администратор изменил ваш день в марафоне!*\n\n"
-                f"📊 *Текущий день: {new_day} из 30*\n\n"
-                f"Нажмите /start, чтобы продолжить с {new_day} дня.",
+                f"📊 *Текущий день: {new_day} из 30*",
                 parse_mode="Markdown"
             )
-            logger.info(f"Уведомление об изменении дня отправлено пользователю {user_id}")
         except Exception as e:
-            logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+            logger.error(f"Не удалось отправить уведомление: {e}")
             
     except ValueError:
         await message.answer("❌ Неверный ID пользователя или день.")
 
 @dp.message(Command("admin_info"))
 async def admin_user_info(message: types.Message):
-    """Получение подробной информации о пользователе (админ-команда)"""
+    """Получение подробной информации о пользователе"""
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ У вас нет доступа к этой команде.")
         return
@@ -1412,12 +1402,12 @@ async def admin_user_info(message: types.Message):
     try:
         user_id = int(args[1])
         
-        user = await get_user(user_id)
+        user = get_user_direct(user_id)
         if not user:
             await message.answer(f"❌ Пользователь с ID {user_id} не найден.")
             return
         
-        reports = await get_user_reports(user_id)
+        reports = get_user_reports_direct(user_id)
         
         info_text = f"📊 *Информация о пользователе*\n\n"
         info_text += f"👤 *ID:* `{user[0]}`\n"
@@ -1460,7 +1450,7 @@ async def admin_user_info(message: types.Message):
 
 @dp.message(Command("admin_sync"))
 async def admin_sync_user(message: types.Message):
-    """Принудительная синхронизация данных пользователя (админ-команда)"""
+    """Принудительная синхронизация данных пользователя"""
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ У вас нет доступа к этой команде.")
         return
@@ -1469,9 +1459,7 @@ async def admin_sync_user(message: types.Message):
     if len(args) < 2:
         await message.answer(
             "❌ *Использование:* `/admin_sync user_id`\n"
-            "Пример: `/admin_sync 123456789`\n\n"
-            "Эта команда синхронизирует данные пользователя, "
-            "исправляя возможные несоответствия.",
+            "Пример: `/admin_sync 123456789`",
             parse_mode="Markdown"
         )
         return
@@ -1548,7 +1536,7 @@ async def admin_sync_user(message: types.Message):
 
 @dp.message(Command("admin_diagnose"))
 async def admin_diagnose_user(message: types.Message):
-    """Диагностика пользователя (админ-команда)"""
+    """Диагностика пользователя"""
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ У вас нет доступа к этой команде.")
         return
@@ -1621,11 +1609,11 @@ async def admin_diagnose_user(message: types.Message):
 
 @dp.message(Command("stats"))
 async def stats_command(message: types.Message):
-    """Расширенная статистика (только для админа)"""
+    """Расширенная статистика"""
     if message.from_user.id != ADMIN_ID:
         return
     
-    users = await get_all_users_for_admin()
+    users = get_all_users_for_admin_direct()
     
     if not users:
         await message.answer("Нет данных")
@@ -1662,17 +1650,16 @@ async def handle_admin_callbacks(callback: types.CallbackQuery):
     if action == 'reset':
         user_id = int(callback.data.split('_')[2])
         
-        user = await get_user(user_id)
+        user = get_user_direct(user_id)
         if not user:
             await callback.message.answer(f"❌ Пользователь {user_id} не найден")
             await callback.answer()
             return
         
-        await reset_user_progress(user_id)
+        reset_user_progress_direct(user_id)
         
         await callback.message.edit_text(
-            f"✅ *Прогресс пользователя {user_id} успешно сброшен на 1-й день*\n\n"
-            f"📝 Имя: {user[2] or user[1] or 'Не указано'}",
+            f"✅ *Прогресс пользователя {user_id} успешно сброшен на 1-й день*",
             parse_mode="Markdown"
         )
         
@@ -1689,7 +1676,7 @@ async def handle_admin_callbacks(callback: types.CallbackQuery):
     elif action == 'force':
         user_id = int(callback.data.split('_')[3])
         
-        user = await get_user(user_id)
+        user = get_user_direct(user_id)
         if not user:
             await callback.message.answer(f"❌ Пользователь {user_id} не найден")
             await callback.answer()
@@ -1714,9 +1701,7 @@ async def handle_admin_callbacks(callback: types.CallbackQuery):
         conn.commit()
         
         await callback.message.edit_text(
-            f"✅ *Принудительный полный сброс выполнен для пользователя {user_id}*\n\n"
-            f"📝 Имя: {user[2] or user[1] or 'Не указано'}\n"
-            f"🔄 Все данные очищены",
+            f"✅ *Принудительный полный сброс выполнен для пользователя {user_id}*",
             parse_mode="Markdown"
         )
         
@@ -1774,7 +1759,6 @@ async def handle_admin_callbacks(callback: types.CallbackQuery):
             await callback.message.edit_text(
                 f"✅ *Синхронизация выполнена*\n\n"
                 f"👤 ID: {user_id}\n"
-                f"📝 Имя: {user[2] or user[1] or 'Не указано'}\n\n"
                 f"*Исправлено:*\n" + "\n".join(updates),
                 parse_mode="Markdown"
             )
@@ -1782,7 +1766,6 @@ async def handle_admin_callbacks(callback: types.CallbackQuery):
             await callback.message.edit_text(
                 f"✅ *Синхронизация выполнена*\n\n"
                 f"👤 ID: {user_id}\n"
-                f"📝 Имя: {user[2] or user[1] or 'Не указано'}\n\n"
                 f"Данные уже корректны.",
                 parse_mode="Markdown"
             )
@@ -1813,10 +1796,10 @@ async def handle_admin_callbacks(callback: types.CallbackQuery):
         user_id = int(parts[3])
         new_day = int(parts[4])
         
-        user = await get_user(user_id)
+        user = get_user_direct(user_id)
         if user:
             old_day = user[4]
-            await update_user_day(user_id, new_day)
+            update_user_day_direct(user_id, new_day)
             
             if user[7] == 1:
                 conn = get_db()
@@ -1827,7 +1810,6 @@ async def handle_admin_callbacks(callback: types.CallbackQuery):
             await callback.message.edit_text(
                 f"✅ *День пользователя изменен*\n\n"
                 f"👤 ID: {user_id}\n"
-                f"📝 Имя: {user[2] or user[1] or 'Не указано'}\n"
                 f"📊 Был на дне: {old_day}\n"
                 f"🔄 Установлен день: {new_day}",
                 parse_mode="Markdown"
@@ -1848,7 +1830,7 @@ async def handle_admin_callbacks(callback: types.CallbackQuery):
     elif action == 'allreports':
         user_id = int(callback.data.split('_')[2])
         
-        reports = await get_user_reports(user_id)
+        reports = get_user_reports_direct(user_id)
         
         if not reports:
             await callback.message.answer(f"📋 *Нет отчетов для пользователя {user_id}*", parse_mode="Markdown")
@@ -1889,11 +1871,11 @@ async def check_reminders():
                     last_check_date = current_date
                     logger.info(f"Запуск проверки напоминаний на {current_date}")
                     
-                    users = await get_all_active_users()
+                    users = get_all_active_users_direct()
                     
                     for user_id, current_day in users:
                         try:
-                            has_report = await get_report_status(user_id, current_day)
+                            has_report = get_report_status_direct(user_id, current_day)
                             
                             if has_report:
                                 continue
@@ -1917,10 +1899,10 @@ async def check_reminders():
                                     reply_markup=get_report_keyboard(next_day)
                                 )
                                 
-                                await update_user_day(user_id, next_day)
-                                await update_last_task_date(user_id)
+                                update_user_day_direct(user_id, next_day)
+                                update_last_task_date_direct(user_id)
                             else:
-                                await complete_marathon(user_id)
+                                complete_marathon_direct(user_id)
                                 await bot.send_message(
                                     user_id,
                                     FINAL_MESSAGE,
