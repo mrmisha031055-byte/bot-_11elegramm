@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 2.1
-Дата: 2026-03-21
-Исправленная версия с переменными окружения
+Версия: 2.2
+Дата: 2026-03-22
+Добавлены админ-команды для управления пользователями
 """
 
 import asyncio
@@ -28,20 +27,15 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 
 # ==================== НАСТРОЙКИ ====================
-# Токен берется из переменной окружения BOT_TOKEN
-# На Bothost нужно создать переменную BOT_TOKEN с вашим токеном
 TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_ID = 8406317983  # Ваш Telegram ID
 
-# Проверка наличия токена
 if TOKEN == "YOUR_BOT_TOKEN_HERE":
     raise ValueError("❌ Токен не найден! Добавьте переменную окружения BOT_TOKEN на хостинге.")
 
-# Время автоматической отправки напоминания (23:59)
 REMINDER_HOUR = 23
 REMINDER_MINUTE = 59
 
-# Настройки логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -99,7 +93,6 @@ def init_db():
         )
     ''')
     
-    # Создаем индексы для быстрого поиска
     cur.execute('CREATE INDEX IF NOT EXISTS idx_user_day ON daily_reports(user_id, day)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_active_users ON users(is_active, completed_30)')
     
@@ -198,12 +191,20 @@ def get_all_users_for_admin() -> list:
 
 @async_wrapper
 def reset_user_progress(user_id: int):
-    """Сброс прогресса пользователя (для тестирования)"""
+    """Сброс прогресса пользователя"""
     conn = get_db()
     cur = conn.cursor()
     cur.execute("DELETE FROM daily_reports WHERE user_id = ?", (user_id,))
     cur.execute("UPDATE users SET current_day = 1, last_task_date = NULL, last_report_date = NULL, completed_30 = 0, is_active = 1 WHERE user_id = ?", (user_id,))
     conn.commit()
+
+@async_wrapper
+def get_user_reports(user_id: int) -> list:
+    """Получение всех отчетов пользователя"""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT day, status, report_date, tasks_completed, total_tasks FROM daily_reports WHERE user_id = ? ORDER BY day", (user_id,))
+    return cur.fetchall()
 
 # ==================== КОНТЕНТ (ТЕКСТЫ) ====================
 
@@ -865,7 +866,7 @@ bot = Bot(
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ==================== ТРОТТЛИНГ (ЗАЩИТА ОТ ПЕРЕГРУЗОК) ====================
+# ==================== ТРОТТЛИНГ ====================
 class ThrottlingMiddleware:
     def __init__(self, rate_limit: float = 0.5):
         self.rate_limit = rate_limit
@@ -897,9 +898,11 @@ async def cmd_start(message: types.Message):
     user_data = await get_user(user.id)
     current_day = user_data[4] if user_data else 1
     
-    if user_data and user_data[7] == 1:  # completed_30 == 1
+    if user_data and user_data[7] == 1:
         await message.answer(
-            "🎉 *Ты уже прошел марафон!*\n\nСпасибо, что был со мной эти 30 дней!",
+            "🎉 *Ты уже прошел марафон!*\n\n"
+            "Спасибо, что был со мной эти 30 дней!\n\n"
+            "Хочешь пройти марафон заново? Обратись к администратору.",
             parse_mode="Markdown",
             reply_markup=types.ReplyKeyboardRemove()
         )
@@ -955,7 +958,9 @@ async def i_am_ready(message: types.Message):
     
     if completed_30 == 1:
         await message.answer(
-            "🎉 *Ты уже завершил марафон!*\n\nСпасибо, что был со мной эти 30 дней!",
+            "🎉 *Ты уже завершил марафон!*\n\n"
+            "Спасибо, что был со мной эти 30 дней!\n\n"
+            "Хочешь пройти марафон заново? Обратись к администратору.",
             parse_mode="Markdown",
             reply_markup=types.ReplyKeyboardRemove()
         )
@@ -981,7 +986,8 @@ async def i_am_ready(message: types.Message):
             await complete_marathon(user_id)
             await message.answer(FINAL_MESSAGE, parse_mode="Markdown")
             await message.answer(
-                "🎉 *Марафон завершен!*\n\nСпасибо, что был со мной эти 30 дней!",
+                "🎉 *Марафон завершен!*\n\n"
+                "Спасибо, что был со мной эти 30 дней!",
                 parse_mode="Markdown",
                 reply_markup=types.ReplyKeyboardRemove()
             )
@@ -1014,8 +1020,7 @@ async def process_report(callback: types.CallbackQuery):
     
     current_day = user[4]
     
-    # Проверка: были ли отправлены задачи на этот день
-    if not user[5]:  # last_task_date is None
+    if not user[5]:
         await callback.answer("Сначала нажми «✅ Я ГОТОВ», чтобы получить задачи!", show_alert=True)
         return
     
@@ -1034,31 +1039,27 @@ async def process_report(callback: types.CallbackQuery):
     
     completed = completed_map.get(report, 0)
     
-    # Сохраняем отчет
     await save_report(user_id, current_day, completed, total_tasks, report)
     await update_last_report_date(user_id)
     
-    # Отправляем оценку
     feedback = FEEDBACK_MESSAGES[current_day].get(report, "Спасибо за отчет!")
     await callback.message.answer(feedback, parse_mode="Markdown")
     
-    # Отправляем поддержку, если есть
     if current_day in SUPPORT_MESSAGES:
         await callback.message.answer(SUPPORT_MESSAGES[current_day], parse_mode="Markdown")
     
-    # Если это 30-й день - завершаем марафон
     if current_day == 30:
         await complete_marathon(user_id)
         await callback.message.answer(FINAL_MESSAGE, parse_mode="Markdown")
         await callback.message.answer(
-            "🎉 *Марафон завершен!*\n\nСпасибо, что был со мной эти 30 дней!",
+            "🎉 *Марафон завершен!*\n\n"
+            "Спасибо, что был со мной эти 30 дней!",
             parse_mode="Markdown",
             reply_markup=types.ReplyKeyboardRemove()
         )
         await callback.answer()
         return
     
-    # Переходим к следующему дню
     next_day = current_day + 1
     await update_user_day(user_id, next_day)
     
@@ -1077,7 +1078,7 @@ async def process_report(callback: types.CallbackQuery):
     logger.info(f"Отчет от {user_id} за день {current_day} обработан за {asyncio.get_event_loop().time() - start_time:.2f} сек")
     await callback.answer()
 
-# ==================== АДМИНКА ====================
+# ==================== АДМИН-КОМАНДЫ ====================
 @dp.message(Command("admin"))
 async def admin_command(message: types.Message):
     """Админская команда для просмотра пользователей"""
@@ -1088,48 +1089,214 @@ async def admin_command(message: types.Message):
     users = await get_all_users_for_admin()
     
     if not users:
-        await message.answer("📊 *Нет активных пользователей*", parse_mode="Markdown")
+        await message.answer("📊 *Нет пользователей*", parse_mode="Markdown")
         return
     
-    text = "📊 *Статистика пользователей*\n\n"
+    active = [u for u in users if u[4] == 0]
+    completed = [u for u in users if u[4] == 1]
     
-    active = [u for u in users if u[4] == 0]  # not completed_30
-    completed = [u for u in users if u[4] == 1]  # completed_30
-    
+    text = "📊 *Панель администратора*\n\n"
     text += f"👥 *Всего:* {len(users)}\n"
     text += f"✅ *Активных:* {len(active)}\n"
     text += f"🏆 *Завершили:* {len(completed)}\n\n"
     text += "─" * 30 + "\n\n"
+    text += "*Доступные команды:*\n"
+    text += "• `/admin_info ID` - информация о пользователе\n"
+    text += "• `/admin_reset ID` - сброс на день 1\n"
+    text += "• `/admin_set_day ID день` - установить день\n"
+    text += "• `/stats` - расширенная статистика\n\n"
     text += "*Список активных пользователей:*\n"
     
-    for user in active[:15]:  # Показываем максимум 15
+    for user in active[:20]:
         user_id, username, first_name, day, _, last_report = user
         name = first_name or username or str(user_id)
         last_report_str = last_report.split()[0] if last_report else "нет отчета"
-        text += f"👤 {name} (ID: {user_id}) — День {day} — Отчет: {last_report_str}\n"
+        text += f"👤 {name} (ID: `{user_id}`) — День {day} — Отчет: {last_report_str}\n"
     
-    if len(active) > 15:
-        text += f"\n*... и еще {len(active) - 15} пользователей*"
+    if len(active) > 20:
+        text += f"\n*... и еще {len(active) - 20} пользователей*"
     
     await message.answer(text, parse_mode="Markdown")
 
-@dp.message(Command("reset"))
-async def reset_user_command(message: types.Message):
-    """Сброс прогресса пользователя (только для админа)"""
+@dp.message(Command("admin_reset"))
+async def admin_reset_user(message: types.Message):
+    """Сброс пользователя на 1-й день (админ-команда)"""
     if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ У вас нет доступа к этой команде.")
         return
     
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("Использование: /reset user_id")
+        await message.answer(
+            "❌ *Использование:* `/admin_reset user_id`\n"
+            "Пример: `/admin_reset 123456789`\n\n"
+            "Также можно использовать:\n"
+            "• `/admin_set_day user_id день` - установить конкретный день\n"
+            "• `/admin_info user_id` - получить информацию о пользователе",
+            parse_mode="Markdown"
+        )
         return
     
     try:
         user_id = int(args[1])
+        
+        user = await get_user(user_id)
+        if not user:
+            await message.answer(f"❌ Пользователь с ID {user_id} не найден в базе данных.")
+            return
+        
         await reset_user_progress(user_id)
-        await message.answer(f"✅ Прогресс пользователя {user_id} сброшен")
+        
+        await message.answer(
+            f"✅ *Прогресс пользователя сброшен*\n\n"
+            f"👤 ID: {user_id}\n"
+            f"📝 Имя: {user[2] or user[1] or 'Не указано'}\n"
+            f"📊 Был на дне: {user[4]}\n"
+            f"🔄 Сброшен на день: 1",
+            parse_mode="Markdown"
+        )
+        
+        try:
+            await bot.send_message(
+                user_id,
+                "🔄 *Администратор сбросил ваш прогресс в марафоне!*\n\n"
+                "Теперь вы можете начать марафон заново. "
+                "Нажмите /start для начала.",
+                parse_mode="Markdown"
+            )
+            logger.info(f"Уведомление о сбросе отправлено пользователю {user_id}")
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+            
     except ValueError:
-        await message.answer("❌ Неверный ID пользователя")
+        await message.answer("❌ Неверный ID пользователя. ID должен быть числом.")
+
+@dp.message(Command("admin_set_day"))
+async def admin_set_user_day(message: types.Message):
+    """Установка конкретного дня для пользователя (админ-команда)"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ У вас нет доступа к этой команде.")
+        return
+    
+    args = message.text.split()
+    if len(args) < 3:
+        await message.answer(
+            "❌ *Использование:* `/admin_set_day user_id день`\n"
+            "Пример: `/admin_set_day 123456789 15`\n\n"
+            "День должен быть от 1 до 30",
+            parse_mode="Markdown"
+        )
+        return
+    
+    try:
+        user_id = int(args[1])
+        new_day = int(args[2])
+        
+        if new_day < 1 or new_day > 30:
+            await message.answer("❌ День должен быть от 1 до 30.")
+            return
+        
+        user = await get_user(user_id)
+        if not user:
+            await message.answer(f"❌ Пользователь с ID {user_id} не найден.")
+            return
+        
+        old_day = user[4]
+        
+        await update_user_day(user_id, new_day)
+        
+        if user[7] == 1:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("UPDATE users SET completed_30 = 0, is_active = 1 WHERE user_id = ?", (user_id,))
+            conn.commit()
+        
+        await message.answer(
+            f"✅ *День пользователя изменен*\n\n"
+            f"👤 ID: {user_id}\n"
+            f"📝 Имя: {user[2] or user[1] or 'Не указано'}\n"
+            f"📊 Был на дне: {old_day}\n"
+            f"🔄 Установлен день: {new_day}",
+            parse_mode="Markdown"
+        )
+        
+        try:
+            await bot.send_message(
+                user_id,
+                f"🔄 *Администратор изменил ваш день в марафоне!*\n\n"
+                f"📊 *Текущий день: {new_day} из 30*\n\n"
+                f"Нажмите /start, чтобы продолжить с {new_day} дня.",
+                parse_mode="Markdown"
+            )
+            logger.info(f"Уведомление об изменении дня отправлено пользователю {user_id}")
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+            
+    except ValueError:
+        await message.answer("❌ Неверный ID пользователя или день. Убедитесь, что оба значения - числа.")
+
+@dp.message(Command("admin_info"))
+async def admin_user_info(message: types.Message):
+    """Получение подробной информации о пользователе (админ-команда)"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ У вас нет доступа к этой команде.")
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer(
+            "❌ *Использование:* `/admin_info user_id`\n"
+            "Пример: `/admin_info 123456789`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    try:
+        user_id = int(args[1])
+        
+        user = await get_user(user_id)
+        if not user:
+            await message.answer(f"❌ Пользователь с ID {user_id} не найден.")
+            return
+        
+        reports = await get_user_reports(user_id)
+        
+        info_text = f"📊 *Информация о пользователе*\n\n"
+        info_text += f"👤 *ID:* `{user[0]}`\n"
+        info_text += f"📝 *Имя:* {user[2] or 'Не указано'}\n"
+        info_text += f"🔖 *Username:* @{user[1] if user[1] else 'Не указан'}\n"
+        info_text += f"📅 *Дата старта:* {user[3].split('T')[0] if user[3] else 'Не указана'}\n"
+        info_text += f"📊 *Текущий день:* {user[4]}\n"
+        info_text += f"✅ *Завершил марафон:* {'Да' if user[7] == 1 else 'Нет'}\n"
+        info_text += f"📝 *Последний отчет:* {user[6].split('T')[0] if user[6] else 'Нет'}\n\n"
+        
+        if reports:
+            info_text += f"📋 *Отчеты по дням:*\n"
+            completed_days = len([r for r in reports if '✅' in r[1] or '🟡' in r[1]])
+            info_text += f"✅ *Выполненных дней:* {completed_days} из {min(user[4]-1, 30)}\n\n"
+            
+            info_text += f"*Последние 10 отчетов:*\n"
+            for report in reports[-10:]:
+                day, status, date, _, _ = report
+                date_short = date.split('T')[0] if date else 'Неизвестно'
+                info_text += f"День {day}: {status} ({date_short})\n"
+        else:
+            info_text += f"📋 *Нет ни одного отчета*"
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔄 Сбросить на день 1", callback_data=f"admin_reset_{user_id}"),
+                InlineKeyboardButton(text="📊 Установить день", callback_data=f"admin_setday_{user_id}")
+            ],
+            [
+                InlineKeyboardButton(text="📝 Показать все отчеты", callback_data=f"admin_allreports_{user_id}")
+            ]
+        ])
+        
+        await message.answer(info_text, parse_mode="Markdown", reply_markup=kb)
+        
+    except ValueError:
+        await message.answer("❌ Неверный ID пользователя. ID должен быть числом.")
 
 @dp.message(Command("stats"))
 async def stats_command(message: types.Message):
@@ -1162,6 +1329,131 @@ async def stats_command(message: types.Message):
     
     await message.answer(text, parse_mode="Markdown")
 
+@dp.callback_query(lambda c: c.data.startswith('admin_'))
+async def handle_admin_callbacks(callback: types.CallbackQuery):
+    """Обработка админских callback-запросов"""
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("❌ Нет доступа", show_alert=True)
+        return
+    
+    action = callback.data.split('_')[1]
+    
+    if action == 'reset':
+        user_id = int(callback.data.split('_')[2])
+        
+        user = await get_user(user_id)
+        if not user:
+            await callback.message.answer(f"❌ Пользователь {user_id} не найден")
+            await callback.answer()
+            return
+        
+        await reset_user_progress(user_id)
+        
+        await callback.message.edit_text(
+            f"✅ *Прогресс пользователя {user_id} успешно сброшен на 1-й день*\n\n"
+            f"📝 Имя: {user[2] or user[1] or 'Не указано'}",
+            parse_mode="Markdown"
+        )
+        
+        try:
+            await bot.send_message(
+                user_id,
+                "🔄 *Администратор сбросил ваш прогресс в марафоне!*\n\n"
+                "Теперь вы можете начать марафон заново. "
+                "Нажмите /start для начала.",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
+            
+    elif action == 'setday':
+        user_id = int(callback.data.split('_')[2])
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[])
+        row = []
+        for day in range(1, 31):
+            row.append(InlineKeyboardButton(text=str(day), callback_data=f"admin_setday_val_{user_id}_{day}"))
+            if len(row) == 5:
+                kb.inline_keyboard.append(row)
+                row = []
+        if row:
+            kb.inline_keyboard.append(row)
+        kb.inline_keyboard.append([InlineKeyboardButton(text="❌ Отмена", callback_data="admin_cancel")])
+        
+        await callback.message.answer(
+            f"📊 *Выберите день для пользователя {user_id}*",
+            parse_mode="Markdown",
+            reply_markup=kb
+        )
+        await callback.message.delete()
+        
+    elif action == 'setday_val':
+        parts = callback.data.split('_')
+        user_id = int(parts[3])
+        new_day = int(parts[4])
+        
+        user = await get_user(user_id)
+        if user:
+            old_day = user[4]
+            await update_user_day(user_id, new_day)
+            
+            if user[7] == 1:
+                conn = get_db()
+                cur = conn.cursor()
+                cur.execute("UPDATE users SET completed_30 = 0, is_active = 1 WHERE user_id = ?", (user_id,))
+                conn.commit()
+            
+            await callback.message.edit_text(
+                f"✅ *День пользователя изменен*\n\n"
+                f"👤 ID: {user_id}\n"
+                f"📝 Имя: {user[2] or user[1] or 'Не указано'}\n"
+                f"📊 Был на дне: {old_day}\n"
+                f"🔄 Установлен день: {new_day}",
+                parse_mode="Markdown"
+            )
+            
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"🔄 *Администратор изменил ваш день в марафоне!*\n\n"
+                    f"📊 *Текущий день: {new_day} из 30*\n\n"
+                    f"Нажмите /start, чтобы продолжить с {new_day} дня.",
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
+        else:
+            await callback.message.edit_text(f"❌ Пользователь {user_id} не найден")
+            
+    elif action == 'allreports':
+        user_id = int(callback.data.split('_')[2])
+        
+        reports = await get_user_reports(user_id)
+        
+        if not reports:
+            await callback.message.answer(f"📋 *Нет отчетов для пользователя {user_id}*", parse_mode="Markdown")
+            await callback.answer()
+            return
+        
+        text = f"📋 *Все отчеты пользователя {user_id}*\n\n"
+        for report in reports:
+            day, status, date, completed, total = report
+            date_short = date.split('T')[0] if date else 'Неизвестно'
+            text += f"*День {day}:* {status} ({completed}/{total}) - {date_short}\n"
+        
+        if len(text) > 4000:
+            parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
+            for part in parts:
+                await callback.message.answer(part, parse_mode="Markdown")
+        else:
+            await callback.message.answer(text, parse_mode="Markdown")
+            
+    elif action == 'cancel':
+        await callback.message.delete()
+        await callback.message.answer("❌ Операция отменена")
+    
+    await callback.answer()
+
 # ==================== ФОНОВЫЕ ЗАДАЧИ ====================
 async def check_reminders():
     """Проверка напоминаний в 23:59"""
@@ -1172,7 +1464,6 @@ async def check_reminders():
             now = datetime.now()
             current_date = now.date()
             
-            # Проверяем, нужно ли отправлять напоминания (в 23:59)
             if now.hour == REMINDER_HOUR and now.minute >= REMINDER_MINUTE:
                 if last_check_date != current_date:
                     last_check_date = current_date
@@ -1182,20 +1473,17 @@ async def check_reminders():
                     
                     for user_id, current_day in users:
                         try:
-                            # Проверяем, был ли уже отчет за текущий день
                             has_report = await get_report_status(user_id, current_day)
                             
                             if has_report:
-                                continue  # Уже отчитался, пропускаем
+                                continue
                             
-                            # Отправляем напоминание
                             await bot.send_message(
                                 user_id,
                                 REMINDER_MESSAGE,
                                 parse_mode="Markdown"
                             )
                             
-                            # Переходим к следующему дню
                             next_day = current_day + 1
                             if next_day <= 30:
                                 day_tasks = DAILY_TASKS[next_day]
@@ -1236,8 +1524,10 @@ async def set_commands():
     commands = [
         BotCommand(command="start", description="Запустить бота"),
         BotCommand(command="admin", description="Админ-панель"),
-        BotCommand(command="stats", description="Статистика (админ)"),
-        BotCommand(command="reset", description="Сброс пользователя (админ)")
+        BotCommand(command="admin_info", description="Информация о пользователе"),
+        BotCommand(command="admin_reset", description="Сброс пользователя"),
+        BotCommand(command="admin_set_day", description="Установить день"),
+        BotCommand(command="stats", description="Статистика")
     ]
     await bot.set_my_commands(commands)
 
