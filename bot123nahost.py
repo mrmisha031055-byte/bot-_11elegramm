@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 2.0
+Версия: 2.1
 Дата: 2026-03-21
+Исправленная версия с переменными окружения
 """
 
 import asyncio
@@ -10,6 +11,7 @@ import logging
 import sqlite3
 import threading
 import functools
+import os
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from typing import Tuple, Optional, Dict, Any
@@ -26,8 +28,14 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 
 # ==================== НАСТРОЙКИ ====================
-TOKEN = "8738085026:AAF3TpY8utyQUyK6Ue003W-go0udnHECiWA"  # ВСТАВЬТЕ СВОЙ ТОКЕН
-ADMIN_ID = 8406317983  # ВСТАВЬТЕ СВОЙ TELEGRAM ID
+# Токен берется из переменной окружения BOT_TOKEN
+# На Bothost нужно создать переменную BOT_TOKEN с вашим токеном
+TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+ADMIN_ID = 8406317983  # Ваш Telegram ID
+
+# Проверка наличия токена
+if TOKEN == "YOUR_BOT_TOKEN_HERE":
+    raise ValueError("❌ Токен не найден! Добавьте переменную окружения BOT_TOKEN на хостинге.")
 
 # Время автоматической отправки напоминания (23:59)
 REMINDER_HOUR = 23
