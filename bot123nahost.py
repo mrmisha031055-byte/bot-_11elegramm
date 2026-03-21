@@ -1,8 +1,8 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 2.3
+Версия: 2.4
 Дата: 2026-03-22
-Исправлен сброс пользователей, добавлены команды для управления
+Исправлены проблемы сброса и синхронизации данных
 """
 
 import asyncio
@@ -118,6 +118,13 @@ def get_user(user_id: int) -> Optional[Tuple]:
     cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
     return cur.fetchone()
 
+def get_user_direct(user_id: int) -> Optional[Tuple]:
+    """Прямое получение данных пользователя без обертки"""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    return cur.fetchone()
+
 @async_wrapper
 def update_user_day(user_id: int, day: int):
     """Обновление текущего дня пользователя"""
@@ -195,10 +202,7 @@ def reset_user_progress(user_id: int):
     conn = get_db()
     cur = conn.cursor()
     
-    # Удаляем все отчеты пользователя
     cur.execute("DELETE FROM daily_reports WHERE user_id = ?", (user_id,))
-    
-    # Полностью сбрасываем все поля пользователя
     cur.execute("""
         UPDATE users 
         SET current_day = 1, 
@@ -910,7 +914,7 @@ async def cmd_start(message: types.Message):
     start_time = asyncio.get_event_loop().time()
     
     await add_user(user.id, user.username, user.first_name)
-    user_data = await get_user(user.id)
+    user_data = get_user_direct(user.id)
     
     if not user_data:
         await message.answer("Произошла ошибка. Попробуйте позже.")
@@ -920,6 +924,19 @@ async def cmd_start(message: types.Message):
     completed_30 = user_data[7]
     
     logger.info(f"Пользователь {user.id}: день={current_day}, completed_30={completed_30}")
+    
+    if completed_30 == 1:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM daily_reports WHERE user_id = ? AND day = 30", (user.id,))
+        has_day30 = cur.fetchone()[0] > 0
+        
+        if not has_day30:
+            logger.warning(f"Исправляем ошибочный флаг completed_30 для {user.id}")
+            cur.execute("UPDATE users SET completed_30 = 0, is_active = 1 WHERE user_id = ?", (user.id,))
+            conn.commit()
+            completed_30 = 0
+            current_day = 1
     
     if completed_30 == 1:
         await message.answer(
@@ -958,22 +975,43 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command("my_status"))
 async def my_status_command(message: types.Message):
-    """Команда для просмотра своего статуса"""
+    """Команда для просмотра своего статуса с прямым запросом к БД"""
     user_id = message.from_user.id
-    user_data = await get_user(user_id)
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    user_data = cur.fetchone()
     
     if not user_data:
         await message.answer("❌ Вы не зарегистрированы. Нажмите /start")
         return
     
+    cur.execute("SELECT COUNT(*) FROM daily_reports WHERE user_id = ?", (user_id,))
+    reports_count = cur.fetchone()[0]
+    
+    cur.execute("SELECT day, status, report_date FROM daily_reports WHERE user_id = ? ORDER BY day DESC LIMIT 1", (user_id,))
+    last_report = cur.fetchone()
+    
     status_text = f"📊 *Ваш статус в марафоне*\n\n"
     status_text += f"📅 *День:* {user_data[4]} из 30\n"
     status_text += f"✅ *Завершил марафон:* {'Да' if user_data[7] == 1 else 'Нет'}\n"
-    status_text += f"📝 *Последний отчет:* {user_data[6].split('T')[0] if user_data[6] else 'Нет'}\n"
+    status_text += f"📝 *Всего отчетов:* {reports_count}\n"
     
-    if user_data[4] > 1:
-        has_report_today = await get_report_status(user_id, user_data[4])
-        status_text += f"📋 *Отчет за сегодня:* {'Отправлен' if has_report_today else 'Не отправлен'}\n"
+    if last_report:
+        status_text += f"📋 *Последний отчет:* день {last_report[0]}, статус {last_report[1]}\n"
+    else:
+        status_text += f"📋 *Последний отчет:* Нет\n"
+    
+    if user_data[4] > 1 and user_data[4] <= 30:
+        cur.execute("SELECT id FROM daily_reports WHERE user_id = ? AND day = ?", (user_id, user_data[4]))
+        has_today = cur.fetchone() is not None
+        status_text += f"📋 *Отчет за сегодня:* {'Отправлен' if has_today else 'Не отправлен'}\n"
+    
+    if user_data[7] == 1 and reports_count == 0:
+        status_text += f"\n⚠️ *Обнаружено несоответствие!*\n"
+        status_text += f"Флаг завершения установлен, но нет ни одного отчета.\n"
+        status_text += f"Обратитесь к администратору для исправления."
     
     await message.answer(status_text, parse_mode="Markdown")
 
@@ -1149,6 +1187,8 @@ async def admin_command(message: types.Message):
     text += "• `/admin_reset ID` - сброс на день 1\n"
     text += "• `/admin_force_reset ID` - полный сброс\n"
     text += "• `/admin_set_day ID день` - установить день\n"
+    text += "• `/admin_sync ID` - синхронизация данных\n"
+    text += "• `/admin_diagnose ID` - диагностика\n"
     text += "• `/stats` - расширенная статистика\n\n"
     text += "*Список активных пользователей:*\n"
     
@@ -1238,14 +1278,10 @@ async def admin_force_reset_user(message: types.Message):
             await message.answer(f"❌ Пользователь с ID {user_id} не найден.")
             return
         
-        # Полный сброс через прямое SQL выполнение
         conn = get_db()
         cur = conn.cursor()
         
-        # Удаляем все отчеты
         cur.execute("DELETE FROM daily_reports WHERE user_id = ?", (user_id,))
-        
-        # Полностью обновляем пользователя
         cur.execute("""
             UPDATE users 
             SET current_day = 1, 
@@ -1257,13 +1293,23 @@ async def admin_force_reset_user(message: types.Message):
             WHERE user_id = ?
         """, (datetime.now().isoformat(), user_id))
         
+        cur.execute("UPDATE users SET completed_30 = 0 WHERE user_id = ?", (user_id,))
+        
         conn.commit()
+        
+        cur.execute("SELECT completed_30, current_day FROM users WHERE user_id = ?", (user_id,))
+        result = cur.fetchone()
+        
+        if result and result[0] == 1:
+            cur.execute("UPDATE users SET completed_30 = 0 WHERE user_id = ?", (user_id,))
+            conn.commit()
         
         await message.answer(
             f"✅ *Принудительный полный сброс выполнен*\n\n"
             f"👤 ID: {user_id}\n"
             f"📝 Имя: {user[2] or user[1] or 'Не указано'}\n"
-            f"🔄 Все данные очищены, пользователь сброшен на день 1\n\n"
+            f"🔄 Все данные очищены, пользователь сброшен на день 1\n"
+            f"✅ Флаг завершения марафона сброшен\n\n"
             f"⚠️ Пользователь теперь может начать марафон заново",
             parse_mode="Markdown"
         )
@@ -1402,11 +1448,173 @@ async def admin_user_info(message: types.Message):
             ],
             [
                 InlineKeyboardButton(text="📊 Установить день", callback_data=f"admin_setday_{user_id}"),
+                InlineKeyboardButton(text="🔄 Синхронизировать", callback_data=f"admin_sync_{user_id}"),
                 InlineKeyboardButton(text="📝 Все отчеты", callback_data=f"admin_allreports_{user_id}")
             ]
         ])
         
         await message.answer(info_text, parse_mode="Markdown", reply_markup=kb)
+        
+    except ValueError:
+        await message.answer("❌ Неверный ID пользователя.")
+
+@dp.message(Command("admin_sync"))
+async def admin_sync_user(message: types.Message):
+    """Принудительная синхронизация данных пользователя (админ-команда)"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ У вас нет доступа к этой команде.")
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer(
+            "❌ *Использование:* `/admin_sync user_id`\n"
+            "Пример: `/admin_sync 123456789`\n\n"
+            "Эта команда синхронизирует данные пользователя, "
+            "исправляя возможные несоответствия.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    try:
+        user_id = int(args[1])
+        
+        conn = get_db()
+        cur = conn.cursor()
+        
+        cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        user = cur.fetchone()
+        
+        if not user:
+            await message.answer(f"❌ Пользователь с ID {user_id} не найден.")
+            return
+        
+        cur.execute("SELECT COUNT(*) FROM daily_reports WHERE user_id = ?", (user_id,))
+        reports_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM daily_reports WHERE user_id = ? AND day = 30", (user_id,))
+        has_day30 = cur.fetchone()[0] > 0
+        
+        correct_completed = 1 if has_day30 else 0
+        
+        if reports_count == 0:
+            correct_day = 1
+        else:
+            cur.execute("SELECT MAX(day) FROM daily_reports WHERE user_id = ?", (user_id,))
+            max_day = cur.fetchone()[0]
+            correct_day = max_day + 1 if max_day < 30 else 30
+        
+        updates = []
+        if user[7] != correct_completed:
+            updates.append(f"completed_30: {user[7]} → {correct_completed}")
+            cur.execute("UPDATE users SET completed_30 = ? WHERE user_id = ?", (correct_completed, user_id))
+        
+        if user[4] != correct_day:
+            updates.append(f"current_day: {user[4]} → {correct_day}")
+            cur.execute("UPDATE users SET current_day = ? WHERE user_id = ?", (correct_day, user_id))
+        
+        conn.commit()
+        
+        if updates:
+            await message.answer(
+                f"✅ *Синхронизация выполнена*\n\n"
+                f"👤 ID: {user_id}\n"
+                f"📝 Имя: {user[2] or user[1] or 'Не указано'}\n\n"
+                f"*Исправлено:*\n" + "\n".join(updates),
+                parse_mode="Markdown"
+            )
+            
+            try:
+                await bot.send_message(
+                    user_id,
+                    "🔄 *Ваши данные в марафоне были синхронизированы!*\n\n"
+                    "Теперь все должно работать корректно.\n"
+                    "Нажмите /start для продолжения.",
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
+        else:
+            await message.answer(
+                f"✅ *Синхронизация выполнена*\n\n"
+                f"👤 ID: {user_id}\n"
+                f"📝 Имя: {user[2] or user[1] or 'Не указано'}\n\n"
+                f"Данные уже корректны. Исправлений не требуется.",
+                parse_mode="Markdown"
+            )
+        
+    except ValueError:
+        await message.answer("❌ Неверный ID пользователя.")
+
+@dp.message(Command("admin_diagnose"))
+async def admin_diagnose_user(message: types.Message):
+    """Диагностика пользователя (админ-команда)"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ У вас нет доступа к этой команде.")
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer(
+            "❌ *Использование:* `/admin_diagnose user_id`\n"
+            "Пример: `/admin_diagnose 123456789`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    try:
+        user_id = int(args[1])
+        
+        conn = get_db()
+        cur = conn.cursor()
+        
+        cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        user = cur.fetchone()
+        
+        if not user:
+            await message.answer(f"❌ Пользователь с ID {user_id} не найден.")
+            return
+        
+        cur.execute("SELECT COUNT(*) FROM daily_reports WHERE user_id = ?", (user_id,))
+        reports_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT day, status, report_date FROM daily_reports WHERE user_id = ? ORDER BY day DESC LIMIT 1", (user_id,))
+        last_report = cur.fetchone()
+        
+        diagnostic = f"🔍 *Диагностика пользователя {user_id}*\n\n"
+        diagnostic += f"📊 *Данные из таблицы users:*\n"
+        diagnostic += f"├─ user_id: {user[0]}\n"
+        diagnostic += f"├─ username: @{user[1] if user[1] else 'None'}\n"
+        diagnostic += f"├─ first_name: {user[2] or 'None'}\n"
+        diagnostic += f"├─ start_date: {user[3]}\n"
+        diagnostic += f"├─ current_day: {user[4]}\n"
+        diagnostic += f"├─ last_task_date: {user[5] or 'NULL'}\n"
+        diagnostic += f"├─ last_report_date: {user[6] or 'NULL'}\n"
+        diagnostic += f"├─ is_active: {user[7]}\n"
+        diagnostic += f"└─ completed_30: {user[8]}\n\n"
+        
+        diagnostic += f"📋 *Отчеты:*\n"
+        diagnostic += f"├─ Всего отчетов: {reports_count}\n"
+        if last_report:
+            diagnostic += f"└─ Последний отчет: день {last_report[0]}, статус {last_report[1]}, дата {last_report[2]}\n"
+        else:
+            diagnostic += f"└─ Нет отчетов\n\n"
+        
+        diagnostic += f"\n💡 *Рекомендации:*\n"
+        if user[8] == 1 and reports_count == 0:
+            diagnostic += f"⚠️ Пользователь отмечен как завершивший, но нет отчетов.\n"
+            diagnostic += f"✅ Используйте `/admin_sync {user_id}` для исправления\n"
+        elif user[8] == 1 and reports_count > 0:
+            cur.execute("SELECT COUNT(*) FROM daily_reports WHERE user_id = ? AND day = 30", (user_id,))
+            has_day30 = cur.fetchone()[0] > 0
+            if not has_day30:
+                diagnostic += f"⚠️ Пользователь отмечен как завершивший, но нет отчета за 30 день.\n"
+                diagnostic += f"✅ Используйте `/admin_sync {user_id}` для исправления\n"
+        if user[4] > 1 and reports_count == 0:
+            diagnostic += f"⚠️ Пользователь на {user[4]} дне, но нет ни одного отчета\n"
+            diagnostic += f"✅ Используйте `/admin_sync {user_id}` для исправления\n"
+        
+        await message.answer(diagnostic, parse_mode="Markdown")
         
     except ValueError:
         await message.answer("❌ Неверный ID пользователя.")
@@ -1487,7 +1695,6 @@ async def handle_admin_callbacks(callback: types.CallbackQuery):
             await callback.answer()
             return
         
-        # Полный сброс через прямое SQL выполнение
         conn = get_db()
         cur = conn.cursor()
         
@@ -1503,6 +1710,7 @@ async def handle_admin_callbacks(callback: types.CallbackQuery):
             WHERE user_id = ?
         """, (datetime.now().isoformat(), user_id))
         
+        cur.execute("UPDATE users SET completed_30 = 0 WHERE user_id = ?", (user_id,))
         conn.commit()
         
         await callback.message.edit_text(
@@ -1521,6 +1729,63 @@ async def handle_admin_callbacks(callback: types.CallbackQuery):
             )
         except:
             pass
+            
+    elif action == 'sync':
+        user_id = int(callback.data.split('_')[2])
+        
+        conn = get_db()
+        cur = conn.cursor()
+        
+        cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        user = cur.fetchone()
+        
+        if not user:
+            await callback.message.answer(f"❌ Пользователь {user_id} не найден")
+            await callback.answer()
+            return
+        
+        cur.execute("SELECT COUNT(*) FROM daily_reports WHERE user_id = ?", (user_id,))
+        reports_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM daily_reports WHERE user_id = ? AND day = 30", (user_id,))
+        has_day30 = cur.fetchone()[0] > 0
+        
+        correct_completed = 1 if has_day30 else 0
+        
+        if reports_count == 0:
+            correct_day = 1
+        else:
+            cur.execute("SELECT MAX(day) FROM daily_reports WHERE user_id = ?", (user_id,))
+            max_day = cur.fetchone()[0]
+            correct_day = max_day + 1 if max_day < 30 else 30
+        
+        updates = []
+        if user[7] != correct_completed:
+            updates.append(f"completed_30: {user[7]} → {correct_completed}")
+            cur.execute("UPDATE users SET completed_30 = ? WHERE user_id = ?", (correct_completed, user_id))
+        
+        if user[4] != correct_day:
+            updates.append(f"current_day: {user[4]} → {correct_day}")
+            cur.execute("UPDATE users SET current_day = ? WHERE user_id = ?", (correct_day, user_id))
+        
+        conn.commit()
+        
+        if updates:
+            await callback.message.edit_text(
+                f"✅ *Синхронизация выполнена*\n\n"
+                f"👤 ID: {user_id}\n"
+                f"📝 Имя: {user[2] or user[1] or 'Не указано'}\n\n"
+                f"*Исправлено:*\n" + "\n".join(updates),
+                parse_mode="Markdown"
+            )
+        else:
+            await callback.message.edit_text(
+                f"✅ *Синхронизация выполнена*\n\n"
+                f"👤 ID: {user_id}\n"
+                f"📝 Имя: {user[2] or user[1] or 'Не указано'}\n\n"
+                f"Данные уже корректны.",
+                parse_mode="Markdown"
+            )
             
     elif action == 'setday':
         user_id = int(callback.data.split('_')[2])
@@ -1684,6 +1949,8 @@ async def set_commands():
         BotCommand(command="admin_reset", description="Сброс пользователя"),
         BotCommand(command="admin_force_reset", description="Полный сброс пользователя"),
         BotCommand(command="admin_set_day", description="Установить день"),
+        BotCommand(command="admin_sync", description="Синхронизировать данные"),
+        BotCommand(command="admin_diagnose", description="Диагностика"),
         BotCommand(command="stats", description="Статистика")
     ]
     await bot.set_my_commands(commands)
