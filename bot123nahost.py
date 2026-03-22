@@ -1,8 +1,8 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 3.1 - УЛУЧШЕННАЯ
+Версия: 3.2 - ИСПРАВЛЕННАЯ
 Дата: 2026-03-22
-Добавлены: отложенная отправка задач, защита от повторных отчетов, улучшенная навигация
+Исправлены: клавиатура, отправка поддержки, обработка отчетов
 """
 
 import asyncio
@@ -842,21 +842,16 @@ FEEDBACK_MESSAGES: Dict[int, Dict[str, str]] = {
 }
 
 # ==================== КНОПКИ ====================
-def get_main_keyboard(has_info_shown: bool = False) -> ReplyKeyboardMarkup:
-    """Главная клавиатура - кнопка Я ГОТОВ появляется только после просмотра информации"""
-    if has_info_shown:
-        kb = [
-            [KeyboardButton(text="📋 Получить информацию")],
-            [KeyboardButton(text="✅ Я ГОТОВ")]
-        ]
-    else:
-        kb = [
-            [KeyboardButton(text="📋 Получить информацию")]
-        ]
+def get_main_keyboard() -> ReplyKeyboardMarkup:
+    """Главная клавиатура - всегда показывает обе кнопки"""
+    kb = [
+        [KeyboardButton(text="📋 Получить информацию")],
+        [KeyboardButton(text="✅ Я ГОТОВ")]
+    ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def get_report_keyboard(day: int) -> InlineKeyboardMarkup:
-    """Клавиатура для отчета в зависимости от дня"""
+    """Клавиатура для отчета в зависимости от дня с передачей дня в callback_data"""
     total = DAILY_TASKS[day]["total"]
     builder = InlineKeyboardBuilder()
     
@@ -991,13 +986,13 @@ async def cmd_start(message: types.Message):
             f"{status}\n\n"
             "Нажми *«✅ Я ГОТОВ»*, чтобы продолжить.",
             parse_mode="Markdown",
-            reply_markup=get_main_keyboard(True)
+            reply_markup=get_main_keyboard()
         )
     else:
         await message.answer(
             START_MESSAGE,
             parse_mode="Markdown",
-            reply_markup=get_main_keyboard(has_info_shown)
+            reply_markup=get_main_keyboard()
         )
     
     logger.info(f"Start для {user.id} обработан за {asyncio.get_event_loop().time() - start_time:.2f} сек")
@@ -1017,7 +1012,6 @@ async def my_status_command(message: types.Message):
     completed_30 = user_data[8]
     
     reports = db_get_user_reports(user_id)
-    has_day30 = any(r[0] == 30 for r in reports)
     
     status_text = f"📊 *Ваш статус в марафоне*\n\n"
     status_text += f"📅 *День:* {current_day} из 30\n"
@@ -1041,7 +1035,7 @@ async def get_info(message: types.Message):
     await message.answer(
         INFO_MESSAGE,
         parse_mode="Markdown",
-        reply_markup=get_main_keyboard(True)
+        reply_markup=get_main_keyboard()
     )
 
 @dp.message(F.text == "✅ Я ГОТОВ")
@@ -1108,11 +1102,18 @@ async def i_am_ready(message: types.Message):
 
 @dp.callback_query(lambda c: c.data.startswith('report_'))
 async def process_report(callback: types.CallbackQuery):
-    """Обработка отчетов с защитой от повторных нажатий и отложенной отправкой"""
+    """Обработка отчетов с защитой от повторных нажатий и правильной отправкой поддержки"""
     user_id = callback.from_user.id
     report_data = callback.data.split('_')
-    report = f"{report_data[1]}_{report_data[2]}" if len(report_data) > 3 else callback.data.replace('report_', '')
-    reported_day = int(report_data[-1]) if len(report_data) > 3 else 0
+    
+    # Определяем отчет и день из callback_data
+    if len(report_data) >= 4:
+        report = f"{report_data[1]}_{report_data[2]}"
+        reported_day = int(report_data[3])
+    else:
+        report = callback.data.replace('report_', '')
+        reported_day = 0
+    
     start_time = asyncio.get_event_loop().time()
     
     # Получаем текущие данные пользователя
@@ -1156,22 +1157,21 @@ async def process_report(callback: types.CallbackQuery):
     db_save_report(user_id, current_day, completed, total_tasks, report)
     db_update_last_report_date(user_id)
     
-    # Удаляем сообщение с кнопками, чтобы нельзя было нажать повторно
+    # Удаляем сообщение с кнопками
     await callback.message.delete()
     
-    # Отправляем обратную связь
+    # Отправляем обратную связь из FEEDBACK_MESSAGES
     feedback = FEEDBACK_MESSAGES[current_day].get(report, "Спасибо за отчет!")
     await callback.message.answer(feedback, parse_mode="Markdown")
     
-    # Отправляем поддержку, если есть
+    # Отправляем поддержку из SUPPORT_MESSAGES для ключевых дней
     if current_day in SUPPORT_MESSAGES:
         await callback.message.answer(SUPPORT_MESSAGES[current_day], parse_mode="Markdown")
-        # Ждем 3 секунды после поддержки
         await asyncio.sleep(3)
     else:
-        # Ждем 3 секунды после отчета
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
     
+    # Проверяем, не завершился ли марафон
     if current_day == 30:
         db_complete_marathon(user_id)
         await callback.message.answer(FINAL_MESSAGE, parse_mode="Markdown")
@@ -1440,32 +1440,32 @@ async def admin_user_info(message: types.Message):
         
         reports = db_get_user_reports(user_id)
         
-        info_text = f"📊 *Información del usuario*\n\n"
+        info_text = f"📊 *Информация о пользователе*\n\n"
         info_text += f"👤 *ID:* `{user[0]}`\n"
-        info_text += f"📝 *Nombre:* {user[2] or 'No especificado'}\n"
-        info_text += f"🔖 *Username:* @{user[1] if user[1] else 'No especificado'}\n"
-        info_text += f"📅 *Fecha inicio:* {user[3].split('T')[0] if user[3] else 'No especificada'}\n"
-        info_text += f"📊 *Día actual:* {user[4]}\n"
-        info_text += f"✅ *Completó maratón:* {'Sí' if user[8] == 1 else 'No'}\n"
-        info_text += f"📝 *Último reporte:* {user[6].split('T')[0] if user[6] else 'No'}\n\n"
+        info_text += f"📝 *Имя:* {user[2] or 'Не указано'}\n"
+        info_text += f"🔖 *Username:* @{user[1] if user[1] else 'Не указан'}\n"
+        info_text += f"📅 *Дата старта:* {user[3].split('T')[0] if user[3] else 'Не указана'}\n"
+        info_text += f"📊 *Текущий день:* {user[4]}\n"
+        info_text += f"✅ *Завершил марафон:* {'Да' if user[8] == 1 else 'Нет'}\n"
+        info_text += f"📝 *Последний отчет:* {user[6].split('T')[0] if user[6] else 'Нет'}\n\n"
         
         if reports:
-            info_text += f"📋 *Reportes por día:*\n"
+            info_text += f"📋 *Отчеты по дням:*\n"
             completed_days = len([r for r in reports if '✅' in r[1] or '🟡' in r[1]])
-            info_text += f"✅ *Días completados:* {completed_days} de {min(user[4]-1, 30)}\n\n"
+            info_text += f"✅ *Выполненных дней:* {completed_days} из {min(user[4]-1, 30)}\n\n"
             
-            info_text += f"*Últimos 10 reportes:*\n"
+            info_text += f"*Последние 10 отчетов:*\n"
             for report in reports[-10:]:
                 day, status, date, _, _ = report
-                date_short = date.split('T')[0] if date else 'Desconocido'
-                info_text += f"Día {day}: {status} ({date_short})\n"
+                date_short = date.split('T')[0] if date else 'Неизвестно'
+                info_text += f"День {day}: {status} ({date_short})\n"
         else:
-            info_text += f"📋 *No hay reportes*"
+            info_text += f"📋 *Нет ни одного отчета*"
         
         await message.answer(info_text, parse_mode="Markdown")
         
     except ValueError:
-        await message.answer("❌ ID de usuario inválido.")
+        await message.answer("❌ Неверный ID пользователя.")
 
 @dp.message(Command("admin_sync"))
 async def admin_sync_user(message: types.Message):
