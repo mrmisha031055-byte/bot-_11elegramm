@@ -1,6 +1,6 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 3.6 - ДИАГНОСТИКА В ЧАТ
+Версия: 3.7 - ДИАГНОСТИКА В ОТВЕТЕ
 """
 
 import asyncio
@@ -165,15 +165,6 @@ def db_reset_user(user_id: int):
         conn.commit()
         conn.close()
 
-def db_get_user_reports(user_id: int) -> list:
-    with DB_LOCK:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT day, status, report_date FROM daily_reports WHERE user_id = ? ORDER BY day", (user_id,))
-        result = cur.fetchall()
-        conn.close()
-        return result
-
 # ==================== КОНТЕНТ ====================
 START_MESSAGE = "🌟 *Привет!* Это твой личный спутник на 30 дней.\n\nНажми *«Получить информацию»* чтобы узнать подробности."
 INFO_MESSAGE = "📋 *30-дневный марафон* поможет тебе изменить жизнь.\n\nНажми *«Я ГОТОВ»* чтобы начать!"
@@ -189,13 +180,13 @@ SUPPORT_MESSAGES = {
 FINAL_MESSAGE = "🎉 *Поздравляю!* Ты прошел 30-дневный марафон! 🚀"
 REMINDER_MESSAGE = "⚠️ *Ты забыл отчитаться!* Вот задачи на следующий день."
 
-# ==================== ЗАДАНИЯ (сокращенно для диагностики) ====================
+# ==================== ЗАДАНИЯ ====================
 DAILY_TASKS: Dict[int, Dict[str, Any]] = {}
 for day in range(1, 31):
     DAILY_TASKS[day] = {
         "title": f"ДЕНЬ {day}",
         "tasks": [f"📖 Задание на день {day}"],
-        "total": 5 if day not in [5,7,11,12,13,14,15,16,17,18,19,22,27,28] else 4
+        "total": 5
     }
 
 # ==================== ОЦЕНКИ ====================
@@ -204,9 +195,9 @@ FEEDBACK_MESSAGES: Dict[int, Dict[str, str]] = {}
 # Заполняем для всех дней
 for day in range(1, 31):
     FEEDBACK_MESSAGES[day] = {
-        "5/5": f"✅ *День {day} выполнен полностью!*\nОгонь! Ты красава! 🔥",
-        "3-4/5": f"🟡 *День {day} выполнен больше половины*\nНеплохо! Двигай дальше 👊",
-        "0-2/5": f"🔴 *День {day} выполнен мало*\nБывает. Завтра будет лучше!"
+        "5/5": f"✅ *Всё сделал (5/5)!*\nОгонь! Ты красава! 🔥",
+        "3-4/5": f"🟡 *Сделал больше половины (3-4/5)!*\nНеплохо! Двигай дальше 👊",
+        "0-2/5": f"🔴 *Сделал мало или ничего (0-2/5)!*\nБывает. Завтра будет лучше!"
     }
 
 # ==================== КНОПКИ ====================
@@ -293,48 +284,44 @@ async def process_report(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     callback_data = callback.data
     
-    # ОТПРАВЛЯЕМ ДИАГНОСТИКУ В ЧАТ (тебе!)
-    await bot.send_message(
-        ADMIN_ID,
+    # 1. Показываем диагностику пользователю
+    await callback.message.answer(
         f"🔍 *ДИАГНОСТИКА*\n\n"
-        f"1. Полный callback: `{callback_data}`\n"
-        f"2. Длина: {len(callback_data)}\n"
-        f"3. Символы: {[ord(c) for c in callback_data]}\n\n"
-        f"👤 Пользователь: {user_id}",
+        f"Получен callback: `{callback_data}`\n"
+        f"Длина: {len(callback_data)}",
         parse_mode="Markdown"
     )
     
     # Разбираем
     without_prefix = callback_data.replace('report_', '')
-    await bot.send_message(ADMIN_ID, f"📌 Без префикса: `{without_prefix}`", parse_mode="Markdown")
+    await callback.message.answer(f"📌 Без префикса: `{without_prefix}`", parse_mode="Markdown")
     
     parts = without_prefix.rsplit('_', 1)
-    await bot.send_message(ADMIN_ID, f"📌 Разбор: {parts}", parse_mode="Markdown")
+    await callback.message.answer(f"📌 Разбор: {parts}", parse_mode="Markdown")
     
     if len(parts) != 2:
-        await callback.answer("❌ Ошибка", show_alert=True)
+        await callback.answer("❌ Ошибка формата", show_alert=True)
         return
     
     report_value = parts[0]
     reported_day = int(parts[1])
     
-    await bot.send_message(
-        ADMIN_ID,
+    await callback.message.answer(
         f"📌 report_value: `{report_value}` (длина {len(report_value)})\n"
-        f"📌 reported_day: {reported_day}",
+        f"📌 reported_day: {reported_day}\n"
+        f"📌 Символы report_value: {[ord(c) for c in report_value]}",
         parse_mode="Markdown"
     )
     
     user_data = db_get_user(user_id)
     if not user_data:
-        await callback.message.answer("Ошибка")
+        await callback.message.answer("Ошибка: пользователь не найден")
         await callback.answer()
         return
     
     current_day = user_data[4]
     
-    await bot.send_message(
-        ADMIN_ID,
+    await callback.message.answer(
         f"📌 Текущий день в БД: {current_day}\n"
         f"📌 Совпадают: {reported_day == current_day}",
         parse_mode="Markdown"
@@ -354,7 +341,7 @@ async def process_report(callback: types.CallbackQuery):
         await callback.message.delete()
         return
     
-    # Сохраняем
+    # Сохраняем отчет
     db_save_report(user_id, current_day, 5, 5, report_value)
     db_update_last_report_date(user_id)
     await callback.message.delete()
@@ -362,16 +349,15 @@ async def process_report(callback: types.CallbackQuery):
     # ПОИСК FEEDBACK
     day_feedback = FEEDBACK_MESSAGES.get(current_day, {})
     
-    await bot.send_message(
-        ADMIN_ID,
+    await callback.message.answer(
         f"📚 *ПОИСК FEEDBACK*\n\n"
         f"День {current_day}:\n"
         f"Доступные ключи: {list(day_feedback.keys())}\n"
         f"Ищем: `{report_value}`\n"
         f"Прямое совпадение: {report_value in day_feedback}\n\n"
-        f"Проверка по символам:\n"
+        f"Проверка символов:\n"
         f"Искомый: {[ord(c) for c in report_value]}\n"
-        f"Ключ 5/5: {[ord(c) for c in '5/5']}",
+        f"Ключ '5/5': {[ord(c) for c in '5/5']}",
         parse_mode="Markdown"
     )
     
@@ -379,15 +365,15 @@ async def process_report(callback: types.CallbackQuery):
     feedback_text = None
     if report_value in day_feedback:
         feedback_text = day_feedback[report_value]
-        await bot.send_message(ADMIN_ID, "✅ *Найдено точное совпадение!*", parse_mode="Markdown")
+        await callback.message.answer("✅ *Найдено точное совпадение!*", parse_mode="Markdown")
     else:
-        # Пробуем нормализовать
+        # Пробуем нормализовать (убрать пробелы)
         normalized = report_value.replace(' ', '').strip()
         if normalized in day_feedback:
             feedback_text = day_feedback[normalized]
-            await bot.send_message(ADMIN_ID, f"✅ *Найдено после нормализации!* `{normalized}`", parse_mode="Markdown")
+            await callback.message.answer(f"✅ *Найдено после нормализации!* `{normalized}`", parse_mode="Markdown")
         else:
-            await bot.send_message(ADMIN_ID, "❌ *FEEDBACK НЕ НАЙДЕН!*", parse_mode="Markdown")
+            await callback.message.answer("❌ *FEEDBACK НЕ НАЙДЕН!*", parse_mode="Markdown")
             feedback_text = None
     
     if feedback_text:
