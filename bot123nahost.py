@@ -1,6 +1,6 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 3.7 - ДИАГНОСТИКА В ОТВЕТЕ
+Версия: 3.8 - ФИНАЛЬНАЯ РАБОЧАЯ
 """
 
 import asyncio
@@ -166,8 +166,24 @@ def db_reset_user(user_id: int):
         conn.close()
 
 # ==================== КОНТЕНТ ====================
-START_MESSAGE = "🌟 *Привет!* Это твой личный спутник на 30 дней.\n\nНажми *«Получить информацию»* чтобы узнать подробности."
-INFO_MESSAGE = "📋 *30-дневный марафон* поможет тебе изменить жизнь.\n\nНажми *«Я ГОТОВ»* чтобы начать!"
+START_MESSAGE = """
+🌟 *Привет! Это твой личный спутник на ближайшие 30 дней.*
+
+Выполняя систему обязанностей, которую я буду высылать тебе каждый день, ты изменишь свою жизнь на «до» и «после». Главное помнить: я просто бот, а мои создатели — просто люди, и никакого волшебства здесь нет. Всё зависит только от тебя и твоего желания измениться.
+
+*Ну что, рассказать вкратце, что тебя ждёт? Нажми на кнопку «Получить информацию».*
+"""
+
+INFO_MESSAGE = """
+📋 *Это 30-дневный марафон, созданный для твоего удобства. Пройдёшь его — станешь другим человеком.*
+
+🔹 *1–6 день* — ты втягиваешься в процесс.
+🔹 Дальше ты каждый день выполняешь задания, которые войдут в твой новый распорядок.
+
+❗️ *ИНФОРМАЦИЯ*
+
+Думаю, ты готов. После того как нажмёшь кнопку *«Я ГОТОВ»*, тебе придёт задание на День 1.
+"""
 
 SUPPORT_MESSAGES = {
     1: "✨ *Первый день позади!* Ты красава!",
@@ -192,7 +208,6 @@ for day in range(1, 31):
 # ==================== ОЦЕНКИ ====================
 FEEDBACK_MESSAGES: Dict[int, Dict[str, str]] = {}
 
-# Заполняем для всех дней
 for day in range(1, 31):
     FEEDBACK_MESSAGES[day] = {
         "5/5": f"✅ *Всё сделал (5/5)!*\nОгонь! Ты красава! 🔥",
@@ -202,7 +217,13 @@ for day in range(1, 31):
 
 # ==================== КНОПКИ ====================
 def get_main_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📋 Получить информацию")], [KeyboardButton(text="✅ Я ГОТОВ")]], resize_keyboard=True)
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📋 Получить информацию")],
+            [KeyboardButton(text="✅ Я ГОТОВ")]
+        ], 
+        resize_keyboard=True
+    )
 
 def get_report_keyboard(day: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
@@ -210,7 +231,9 @@ def get_report_keyboard(day: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="✅ Выполнил 5/5", callback_data=f"report_5/5_{day}"),
         InlineKeyboardButton(text="🟡 Выполнил 3-4/5", callback_data=f"report_3-4/5_{day}")
     )
-    builder.row(InlineKeyboardButton(text="🔴 Выполнил 0-2/5", callback_data=f"report_0-2/5_{day}"))
+    builder.row(
+        InlineKeyboardButton(text="🔴 Выполнил 0-2/5", callback_data=f"report_0-2/5_{day}")
+    )
     return builder.as_markup()
 
 # ==================== БОТ ====================
@@ -239,8 +262,11 @@ async def cmd_start(message: types.Message):
     
     if current_day > 1:
         has_report = db_get_report_status(user.id, current_day)
-        status = "✅ Ты уже отчитался." if has_report else "📝 Выполни задания и отправь отчет."
-        await message.answer(f"👋 С возвращением! Ты на {current_day} дне.\n\n{status}\n\nНажми «✅ Я ГОТОВ»", reply_markup=get_main_keyboard())
+        status = "✅ Ты уже отчитался. Готов к следующему дню?" if has_report else "📝 Выполни задания и отправь отчет."
+        await message.answer(
+            f"👋 *С возвращением!*\n\nТы на *{current_day} дне* из 30.\n\n{status}\n\nНажми *«✅ Я ГОТОВ»*, чтобы продолжить.",
+            reply_markup=get_main_keyboard()
+        )
     else:
         await message.answer(START_MESSAGE, reply_markup=get_main_keyboard())
 
@@ -265,39 +291,29 @@ async def i_am_ready(message: types.Message):
             db_update_user_day(user_id, next_day)
             day_tasks = DAILY_TASKS[next_day]
             tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
-            tasks_text += f"\n\n*Нажми кнопку:*"
+            tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
             await message.answer(tasks_text, reply_markup=get_report_keyboard(next_day))
             db_update_last_task_date(user_id)
         else:
             db_complete_marathon(user_id)
             await message.answer(FINAL_MESSAGE)
+            await message.answer("🎉 *Марафон завершен!*", reply_markup=types.ReplyKeyboardRemove())
     else:
         day_tasks = DAILY_TASKS[current_day]
         tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
-        tasks_text += f"\n\n*Нажми кнопку:*"
+        tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
         await message.answer(tasks_text, reply_markup=get_report_keyboard(current_day))
         db_update_last_task_date(user_id)
 
 @dp.callback_query(lambda c: c.data.startswith('report_'))
 async def process_report(callback: types.CallbackQuery):
-    """Обработка отчетов с диагностикой"""
+    """Обработка отчетов"""
     user_id = callback.from_user.id
     callback_data = callback.data
     
-    # 1. Показываем диагностику пользователю
-    await callback.message.answer(
-        f"🔍 *ДИАГНОСТИКА*\n\n"
-        f"Получен callback: `{callback_data}`\n"
-        f"Длина: {len(callback_data)}",
-        parse_mode="Markdown"
-    )
-    
-    # Разбираем
+    # Разбираем callback
     without_prefix = callback_data.replace('report_', '')
-    await callback.message.answer(f"📌 Без префикса: `{without_prefix}`", parse_mode="Markdown")
-    
     parts = without_prefix.rsplit('_', 1)
-    await callback.message.answer(f"📌 Разбор: {parts}", parse_mode="Markdown")
     
     if len(parts) != 2:
         await callback.answer("❌ Ошибка формата", show_alert=True)
@@ -306,26 +322,13 @@ async def process_report(callback: types.CallbackQuery):
     report_value = parts[0]
     reported_day = int(parts[1])
     
-    await callback.message.answer(
-        f"📌 report_value: `{report_value}` (длина {len(report_value)})\n"
-        f"📌 reported_day: {reported_day}\n"
-        f"📌 Символы report_value: {[ord(c) for c in report_value]}",
-        parse_mode="Markdown"
-    )
-    
     user_data = db_get_user(user_id)
     if not user_data:
-        await callback.message.answer("Ошибка: пользователь не найден")
+        await callback.message.answer("Ошибка")
         await callback.answer()
         return
     
     current_day = user_data[4]
-    
-    await callback.message.answer(
-        f"📌 Текущий день в БД: {current_day}\n"
-        f"📌 Совпадают: {reported_day == current_day}",
-        parse_mode="Markdown"
-    )
     
     if reported_day != current_day:
         await callback.answer(f"❌ Кнопка для дня {reported_day}, а вы на дне {current_day}", show_alert=True)
@@ -342,69 +345,52 @@ async def process_report(callback: types.CallbackQuery):
         return
     
     # Сохраняем отчет
-    db_save_report(user_id, current_day, 5, 5, report_value)
+    completed_map = {"5/5": 5, "3-4/5": 3, "0-2/5": 1}
+    completed = completed_map.get(report_value, 0)
+    
+    db_save_report(user_id, current_day, completed, 5, report_value)
     db_update_last_report_date(user_id)
+    
+    # Удаляем сообщение с кнопками
     await callback.message.delete()
     
-    # ПОИСК FEEDBACK
+    # Отправляем feedback
     day_feedback = FEEDBACK_MESSAGES.get(current_day, {})
-    
-    await callback.message.answer(
-        f"📚 *ПОИСК FEEDBACK*\n\n"
-        f"День {current_day}:\n"
-        f"Доступные ключи: {list(day_feedback.keys())}\n"
-        f"Ищем: `{report_value}`\n"
-        f"Прямое совпадение: {report_value in day_feedback}\n\n"
-        f"Проверка символов:\n"
-        f"Искомый: {[ord(c) for c in report_value]}\n"
-        f"Ключ '5/5': {[ord(c) for c in '5/5']}",
-        parse_mode="Markdown"
-    )
-    
-    # Пробуем найти
-    feedback_text = None
-    if report_value in day_feedback:
-        feedback_text = day_feedback[report_value]
-        await callback.message.answer("✅ *Найдено точное совпадение!*", parse_mode="Markdown")
-    else:
-        # Пробуем нормализовать (убрать пробелы)
-        normalized = report_value.replace(' ', '').strip()
-        if normalized in day_feedback:
-            feedback_text = day_feedback[normalized]
-            await callback.message.answer(f"✅ *Найдено после нормализации!* `{normalized}`", parse_mode="Markdown")
-        else:
-            await callback.message.answer("❌ *FEEDBACK НЕ НАЙДЕН!*", parse_mode="Markdown")
-            feedback_text = None
+    feedback_text = day_feedback.get(report_value)
     
     if feedback_text:
         await callback.message.answer(feedback_text, parse_mode="Markdown")
     else:
-        await callback.message.answer(f"✅ Спасибо за отчет! (День {current_day})", parse_mode="Markdown")
+        await callback.message.answer(f"✅ Спасибо за отчет!", parse_mode="Markdown")
     
-    # Поддержка
+    # Отправляем поддержку
     if current_day in SUPPORT_MESSAGES:
         await asyncio.sleep(1)
         await callback.message.answer(SUPPORT_MESSAGES[current_day], parse_mode="Markdown")
     
-    await asyncio.sleep(2)
-    
-    # Завершение
+    # Завершение марафона
     if current_day == 30:
         db_complete_marathon(user_id)
         await callback.message.answer(FINAL_MESSAGE, parse_mode="Markdown")
         await callback.answer()
         return
     
-    # Следующий день
+    # Переход к следующему дню
     next_day = current_day + 1
     db_update_user_day(user_id, next_day)
     
     day_tasks = DAILY_TASKS[next_day]
     tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
-    tasks_text += f"\n\n*Нажми кнопку:*"
+    tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
     
-    await callback.message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(next_day))
+    await callback.message.answer(
+        tasks_text,
+        parse_mode="Markdown",
+        reply_markup=get_report_keyboard(next_day)
+    )
     db_update_last_task_date(user_id)
+    
+    # Важно: answer() должен быть в конце
     await callback.answer()
 
 # ==================== НАПОМИНАНИЯ ====================
@@ -424,18 +410,29 @@ async def check_reminders():
                             if next_day <= 30:
                                 day_tasks = DAILY_TASKS[next_day]
                                 tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
-                                tasks_text += f"\n\n*Нажми кнопку:*"
+                                tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
                                 await bot.send_message(user_id, tasks_text, reply_markup=get_report_keyboard(next_day))
                                 db_update_user_day(user_id, next_day)
                                 db_update_last_task_date(user_id)
             await asyncio.sleep(30)
         except Exception as e:
-            logger.error(f"Ошибка: {e}")
+            logger.error(f"Ошибка в напоминаниях: {e}")
             await asyncio.sleep(60)
 
 # ==================== ЗАПУСК ====================
 async def set_commands():
-    await bot.set_my_commands([BotCommand(command="start", description="Запустить бота")])
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Запустить бота"),
+        BotCommand(command="my_status", description="Мой статус")
+    ])
+
+@dp.message(Command("my_status"))
+async def my_status(message: types.Message):
+    user_data = db_get_user(message.from_user.id)
+    if user_data:
+        await message.answer(f"📊 *Ваш статус*\n\nДень: {user_data[4]} из 30")
+    else:
+        await message.answer("❌ Вы не зарегистрированы")
 
 async def on_startup():
     logger.info("🚀 Бот запускается...")
