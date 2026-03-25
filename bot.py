@@ -1,6 +1,7 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 7.2 - ИСПРАВЛЕННЫЕ НАПОМИНАНИЯ И ЗАЩИТА АДМИНКИ (СКРЫТЫЕ КОМАНДЫ)
+Версия: 7.0 - ПОЛНАЯ РАБОЧАЯ ВЕРСИЯ
+Все задания из файла, правильные тексты после нажатия кнопок
 """
 
 import asyncio
@@ -246,9 +247,9 @@ FINAL_MESSAGE = """
 """
 
 REMINDER_MESSAGE = """
-⚠️ *Ты забыл отчитаться о выполнении задач!*
+⚠️ *Ты забыл отчитаться о выполнении задач, надеюсь ты выполнил все!*
 
-*Пожалуйста, выполни задания за сегодня и отчитайся.*
+*Вот тебе задачи на сегодня, не забудь отчитаться!*
 """
 
 # ==================== ПОДДЕРЖКА ДЛЯ КЛЮЧЕВЫХ ДНЕЙ ====================
@@ -997,14 +998,13 @@ async def process_report(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     callback_data = callback.data
     
-    # Разбираем callback_data: report_5/5_1
     parts = callback_data.split('_')
     
     if len(parts) < 3:
         await callback.answer("❌ Ошибка формата", show_alert=True)
         return
     
-    report_key = parts[1]  # "5/5", "3-4/5", "6/6" и т.д.
+    report_key = parts[1]
     reported_day = int(parts[2])
     
     user_data = db_get_user(user_id)
@@ -1029,7 +1029,6 @@ async def process_report(callback: types.CallbackQuery):
         await callback.message.delete()
         return
     
-    # Сохраняем отчет
     completed_map = {
         "5/5": 5, "3-4/5": 3, "0-2/5": 1,
         "6/6": 6, "4-5/6": 4, "0-3/6": 1,
@@ -1043,7 +1042,6 @@ async def process_report(callback: types.CallbackQuery):
     
     await callback.message.delete()
     
-    # ОТПРАВЛЯЕМ ПРАВИЛЬНЫЙ FEEDBACK
     feedback_text = FEEDBACK_MESSAGES[current_day].get(report_key)
     
     if feedback_text:
@@ -1051,7 +1049,6 @@ async def process_report(callback: types.CallbackQuery):
     else:
         await callback.message.answer(f"✅ Отчет за день {current_day} принят! Ты молодец! 🔥", parse_mode="Markdown")
     
-    # Отправляем поддержку для ключевых дней
     if current_day in SUPPORT_MESSAGES:
         await asyncio.sleep(1)
         await callback.message.answer(SUPPORT_MESSAGES[current_day], parse_mode="Markdown")
@@ -1059,14 +1056,12 @@ async def process_report(callback: types.CallbackQuery):
     else:
         await asyncio.sleep(2)
     
-    # Проверяем завершение марафона
     if current_day == 30:
         db_complete_marathon(user_id)
         await callback.message.answer(FINAL_MESSAGE, parse_mode="Markdown")
         await callback.answer()
         return
     
-    # Переходим к следующему дню
     next_day = current_day + 1
     db_update_user_day(user_id, next_day)
     
@@ -1078,7 +1073,7 @@ async def process_report(callback: types.CallbackQuery):
     db_update_last_task_date(user_id)
     await callback.answer()
 
-# ==================== АДМИН-КОМАНДЫ (С ЗАЩИТОЙ) ====================
+# ==================== АДМИН-КОМАНДЫ ====================
 
 @dp.message(Command("admin"))
 async def admin_command(message: types.Message):
@@ -1361,7 +1356,7 @@ async def stats_command(message: types.Message):
     
     await message.answer(text, parse_mode="Markdown")
 
-# ==================== НАПОМИНАНИЯ (ИСПРАВЛЕННЫЕ) ====================
+# ==================== НАПОМИНАНИЯ ====================
 async def check_reminders():
     last_check_date = None
     
@@ -1384,16 +1379,13 @@ async def check_reminders():
                             if has_report:
                                 continue
                             
-                            # Отправляем напоминание
                             await bot.send_message(user_id, REMINDER_MESSAGE, parse_mode="Markdown")
                             
-                            # Отправляем ТЕКУЩИЕ задачи, а не следующий день
                             day_tasks = DAILY_TASKS[current_day]
                             tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
                             tasks_text += f"\n\n*Ты еще не отчитался за сегодня. Выполни задачи и нажми одну из кнопок:*"
                             
-                            await bot.send_message(user_id, tasks_text, parse_mode="Markdown", 
-                                                  reply_markup=get_report_keyboard(current_day))
+                            await bot.send_message(user_id, tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(current_day))
                             
                             logger.info(f"Напоминание отправлено пользователю {user_id} (день {current_day})")
                             
@@ -1408,30 +1400,25 @@ async def check_reminders():
 
 # ==================== ЗАПУСК ====================
 async def set_commands():
-    # Команды для всех пользователей
     public_commands = [
         BotCommand(command="start", description="Запустить бота"),
         BotCommand(command="my_status", description="Мой статус"),
     ]
     
-    # Админ-команды (видны только админу)
     admin_commands = [
-        BotCommand(command="admin", description="👑 Админ-панель"),
-        BotCommand(command="admin_info", description="👑 Информация о пользователе"),
-        BotCommand(command="admin_reset", description="👑 Сброс пользователя"),
-        BotCommand(command="admin_force_reset", description="👑 Полный сброс"),
-        BotCommand(command="admin_set_day", description="👑 Установить день"),
-        BotCommand(command="admin_sync", description="👑 Синхронизация"),
-        BotCommand(command="stats", description="👑 Статистика")
+        BotCommand(command="admin", description="Админ-панель"),
+        BotCommand(command="admin_info", description="Информация о пользователе"),
+        BotCommand(command="admin_reset", description="Сброс пользователя"),
+        BotCommand(command="admin_force_reset", description="Полный сброс"),
+        BotCommand(command="admin_set_day", description="Установить день"),
+        BotCommand(command="admin_sync", description="Синхронизация"),
+        BotCommand(command="stats", description="Статистика")
     ]
     
-    # Устанавливаем публичные команды для всех
     await bot.set_my_commands(public_commands)
-    
-    # Устанавливаем админ-команды только для админа
     await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
     
-    logger.info("✅ Команды установлены: публичные для всех, админские только для админа")
+    logger.info("✅ Команды установлены")
 
 async def on_startup():
     logger.info("🚀 Бот запускается...")
