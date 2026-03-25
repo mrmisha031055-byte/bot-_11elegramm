@@ -1,7 +1,6 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 7.0 - ПОЛНАЯ РАБОЧАЯ ВЕРСИЯ
-Все задания из файла, правильные тексты после нажатия кнопок
+Версия: 7.2 - ИСПРАВЛЕННЫЕ НАПОМИНАНИЯ И ЗАЩИТА АДМИНКИ (СКРЫТЫЕ КОМАНДЫ)
 """
 
 import asyncio
@@ -17,7 +16,7 @@ from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     BotCommand, InlineKeyboardButton, KeyboardButton, 
-    ReplyKeyboardMarkup, InlineKeyboardMarkup
+    ReplyKeyboardMarkup, InlineKeyboardMarkup, BotCommandScopeChat
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
@@ -34,6 +33,11 @@ REMINDER_MINUTE = 59
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# ==================== ПРОВЕРКА АДМИНА ====================
+def is_admin(user_id: int) -> bool:
+    """Проверка, является ли пользователь администратором"""
+    return user_id == ADMIN_ID
 
 # ==================== БАЗА ДАННЫХ ====================
 DB_LOCK = threading.Lock()
@@ -242,9 +246,9 @@ FINAL_MESSAGE = """
 """
 
 REMINDER_MESSAGE = """
-⚠️ *Ты забыл отчитаться о выполнении задач, надеюсь ты выполнил все!*
+⚠️ *Ты забыл отчитаться о выполнении задач!*
 
-*Вот тебе следующие задачи на грядущий день.*
+*Пожалуйста, выполни задания за сегодня и отчитайся.*
 """
 
 # ==================== ПОДДЕРЖКА ДЛЯ КЛЮЧЕВЫХ ДНЕЙ ====================
@@ -1074,11 +1078,11 @@ async def process_report(callback: types.CallbackQuery):
     db_update_last_task_date(user_id)
     await callback.answer()
 
-# ==================== АДМИН-КОМАНДЫ ====================
+# ==================== АДМИН-КОМАНДЫ (С ЗАЩИТОЙ) ====================
 
 @dp.message(Command("admin"))
 async def admin_command(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
         await message.answer("❌ У вас нет доступа к этой команде.")
         return
     
@@ -1115,7 +1119,7 @@ async def admin_command(message: types.Message):
 
 @dp.message(Command("admin_info"))
 async def admin_info(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
         return
     
     args = message.text.split()
@@ -1158,7 +1162,8 @@ async def admin_info(message: types.Message):
 
 @dp.message(Command("admin_reset"))
 async def admin_reset_user(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет доступа к этой команде.")
         return
     
     args = message.text.split()
@@ -1188,7 +1193,8 @@ async def admin_reset_user(message: types.Message):
 
 @dp.message(Command("admin_force_reset"))
 async def admin_force_reset_user(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет доступа к этой команде.")
         return
     
     args = message.text.split()
@@ -1218,7 +1224,8 @@ async def admin_force_reset_user(message: types.Message):
 
 @dp.message(Command("admin_set_day"))
 async def admin_set_user_day(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет доступа к этой команде.")
         return
     
     args = message.text.split()
@@ -1262,7 +1269,8 @@ async def admin_set_user_day(message: types.Message):
 
 @dp.message(Command("admin_sync"))
 async def admin_sync_user(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет доступа к этой команде.")
         return
     
     args = message.text.split()
@@ -1325,7 +1333,7 @@ async def admin_sync_user(message: types.Message):
 
 @dp.message(Command("stats"))
 async def stats_command(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
         return
     
     users = db_get_all_users()
@@ -1353,7 +1361,7 @@ async def stats_command(message: types.Message):
     
     await message.answer(text, parse_mode="Markdown")
 
-# ==================== НАПОМИНАНИЯ ====================
+# ==================== НАПОМИНАНИЯ (ИСПРАВЛЕННЫЕ) ====================
 async def check_reminders():
     last_check_date = None
     
@@ -1376,20 +1384,16 @@ async def check_reminders():
                             if has_report:
                                 continue
                             
+                            # Отправляем напоминание
                             await bot.send_message(user_id, REMINDER_MESSAGE, parse_mode="Markdown")
                             
-                            next_day = current_day + 1
-                            if next_day <= 30:
-                                day_tasks = DAILY_TASKS[next_day]
-                                tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
-                                tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
-                                
-                                await bot.send_message(user_id, tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(next_day))
-                                db_update_user_day(user_id, next_day)
-                                db_update_last_task_date(user_id)
-                            else:
-                                db_complete_marathon(user_id)
-                                await bot.send_message(user_id, FINAL_MESSAGE, parse_mode="Markdown")
+                            # Отправляем ТЕКУЩИЕ задачи, а не следующий день
+                            day_tasks = DAILY_TASKS[current_day]
+                            tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
+                            tasks_text += f"\n\n*Ты еще не отчитался за сегодня. Выполни задачи и нажми одну из кнопок:*"
+                            
+                            await bot.send_message(user_id, tasks_text, parse_mode="Markdown", 
+                                                  reply_markup=get_report_keyboard(current_day))
                             
                             logger.info(f"Напоминание отправлено пользователю {user_id} (день {current_day})")
                             
@@ -1404,18 +1408,30 @@ async def check_reminders():
 
 # ==================== ЗАПУСК ====================
 async def set_commands():
-    commands = [
+    # Команды для всех пользователей
+    public_commands = [
         BotCommand(command="start", description="Запустить бота"),
         BotCommand(command="my_status", description="Мой статус"),
-        BotCommand(command="admin", description="Админ-панель"),
-        BotCommand(command="admin_info", description="Информация о пользователе"),
-        BotCommand(command="admin_reset", description="Сброс пользователя"),
-        BotCommand(command="admin_force_reset", description="Полный сброс"),
-        BotCommand(command="admin_set_day", description="Установить день"),
-        BotCommand(command="admin_sync", description="Синхронизация"),
-        BotCommand(command="stats", description="Статистика")
     ]
-    await bot.set_my_commands(commands)
+    
+    # Админ-команды (видны только админу)
+    admin_commands = [
+        BotCommand(command="admin", description="👑 Админ-панель"),
+        BotCommand(command="admin_info", description="👑 Информация о пользователе"),
+        BotCommand(command="admin_reset", description="👑 Сброс пользователя"),
+        BotCommand(command="admin_force_reset", description="👑 Полный сброс"),
+        BotCommand(command="admin_set_day", description="👑 Установить день"),
+        BotCommand(command="admin_sync", description="👑 Синхронизация"),
+        BotCommand(command="stats", description="👑 Статистика")
+    ]
+    
+    # Устанавливаем публичные команды для всех
+    await bot.set_my_commands(public_commands)
+    
+    # Устанавливаем админ-команды только для админа
+    await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
+    
+    logger.info("✅ Команды установлены: публичные для всех, админские только для админа")
 
 async def on_startup():
     logger.info("🚀 Бот запускается...")
