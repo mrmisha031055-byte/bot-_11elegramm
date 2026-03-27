@@ -1,6 +1,6 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 8.0 - С ПРЕДПРОСМОТРОМ И ПРАВИЛЬНЫМ ВРЕМЕНЕМ
+Версия: 8.1 - С УЛУЧШЕННОЙ ЛОГИКОЙ КНОПОК
 """
 
 import asyncio
@@ -68,7 +68,8 @@ def init_db():
             last_report_date TEXT,
             is_active INTEGER DEFAULT 1,
             completed_30 INTEGER DEFAULT 0,
-            has_info_shown INTEGER DEFAULT 0
+            has_info_shown INTEGER DEFAULT 0,
+            has_received_first_tasks INTEGER DEFAULT 0
         )
     ''')
     cur.execute('''
@@ -92,8 +93,8 @@ def db_add_user(user_id: int, username: str, first_name: str):
     with DB_LOCK:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, start_date, current_day, has_info_shown) VALUES (?, ?, ?, ?, ?, ?)",
-                    (user_id, username or "", first_name or "", datetime.now(MSK_TZ).isoformat(), 1, 0))
+        cur.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, start_date, current_day, has_info_shown, has_received_first_tasks) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (user_id, username or "", first_name or "", datetime.now(MSK_TZ).isoformat(), 1, 0, 0))
         conn.commit()
         conn.close()
 
@@ -179,7 +180,7 @@ def db_reset_user(user_id: int):
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("DELETE FROM daily_reports WHERE user_id = ?", (user_id,))
-        cur.execute("UPDATE users SET current_day = 1, last_task_date = NULL, last_report_date = NULL, completed_30 = 0, is_active = 1, start_date = ?, has_info_shown = 0 WHERE user_id = ?",
+        cur.execute("UPDATE users SET current_day = 1, last_task_date = NULL, last_report_date = NULL, completed_30 = 0, is_active = 1, start_date = ?, has_info_shown = 0, has_received_first_tasks = 0 WHERE user_id = ?",
                     (datetime.now(MSK_TZ).isoformat(), user_id))
         conn.commit()
         conn.close()
@@ -201,6 +202,23 @@ def db_set_info_shown(user_id: int):
         cur.execute("UPDATE users SET has_info_shown = 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
+
+def db_set_received_first_tasks(user_id: int):
+    with DB_LOCK:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET has_received_first_tasks = 1 WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+
+def db_has_received_first_tasks(user_id: int) -> bool:
+    with DB_LOCK:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT has_received_first_tasks FROM users WHERE user_id = ?", (user_id,))
+        result = cur.fetchone()
+        conn.close()
+        return result[0] == 1 if result else False
 
 # ==================== КОНТЕНТ (ТЕКСТЫ) ====================
 START_MESSAGE = """
@@ -862,33 +880,40 @@ def get_main_keyboard(user_id: int):
     user_data = db_get_user(user_id)
     
     if not user_data:
-        # Новый пользователь
+        # Новый пользователь - только кнопка получить информацию
         return ReplyKeyboardMarkup(
             keyboard=[
-                [KeyboardButton(text="📋 Получить информацию")],
-                [KeyboardButton(text="✅ Я ГОТОВ")]
+                [KeyboardButton(text="📋 Получить информацию")]
             ],
             resize_keyboard=True
         )
     
     current_day = user_data[4]
     completed_30 = user_data[8]
+    has_info_shown = user_data[9]
+    has_received_tasks = user_data[10] if len(user_data) > 10 else 0
     
     if completed_30 == 1:
         return types.ReplyKeyboardRemove()
     
     # Базовые кнопки
     buttons = []
+    
+    # Кнопка "Получить информацию" всегда есть для активных
     buttons.append([KeyboardButton(text="📋 Получить информацию")])
-    buttons.append([KeyboardButton(text="✅ Я ГОТОВ")])
     
-    # Проверяем, можно ли показывать кнопку предпросмотра
-    has_report_today = db_get_report_status(user_id, current_day)
-    now = datetime.now(MSK_TZ)
-    is_after_1830 = now.hour >= PREVIEW_BUTTON_HOUR and now.minute >= PREVIEW_BUTTON_MINUTE
+    # Кнопка "Я готов" появляется только после просмотра информации
+    if has_info_shown == 1:
+        buttons.append([KeyboardButton(text="✅ Я ГОТОВ")])
     
-    if has_report_today or is_after_1830:
-        buttons.append([KeyboardButton(text="📅 Посмотреть задачи на завтра")])
+    # Кнопка предпросмотра появляется только после получения первого дня
+    if has_received_tasks == 1:
+        has_report_today = db_get_report_status(user_id, current_day)
+        now = datetime.now(MSK_TZ)
+        is_after_1830 = now.hour >= PREVIEW_BUTTON_HOUR and now.minute >= PREVIEW_BUTTON_MINUTE
+        
+        if has_report_today or is_after_1830:
+            buttons.append([KeyboardButton(text="📅 Посмотреть задачи на завтра")])
     
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
@@ -1014,6 +1039,16 @@ async def i_am_ready(message: types.Message):
     
     current_day = user_data[4]
     completed_30 = user_data[8]
+    has_info_shown = user_data[9]
+    
+    # Проверяем, что пользователь сначала посмотрел информацию
+    if has_info_shown == 0:
+        await message.answer(
+            "⚠️ *Сначала нажми кнопку «Получить информацию»!*\n\n"
+            "Там я расскажу, что тебя ждёт в марафоне.",
+            parse_mode="Markdown"
+        )
+        return
     
     if completed_30 == 1:
         await message.answer("🎉 *Ты уже завершил марафон!*", parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
@@ -1040,6 +1075,10 @@ async def i_am_ready(message: types.Message):
     
     # Если пользователь не отчитался за сегодня - выдаем текущие задачи
     if not has_report:
+        # Отмечаем, что пользователь получил первый день
+        if current_day == 1:
+            db_set_received_first_tasks(user_id)
+        
         day_tasks = DAILY_TASKS[current_day]
         tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
         tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
