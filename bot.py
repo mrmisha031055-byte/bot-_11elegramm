@@ -1,7 +1,6 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 7.0 - ПОЛНАЯ РАБОЧАЯ ВЕРСИЯ
-Все задания из файла, правильные тексты после нажатия кнопок
+Версия: 8.0 - С ПРЕДПРОСМОТРОМ И ПРАВИЛЬНЫМ ВРЕМЕНЕМ
 """
 
 import asyncio
@@ -10,7 +9,7 @@ import sqlite3
 import threading
 import os
 from datetime import datetime
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -22,6 +21,8 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 
+import pytz
+
 # ==================== НАСТРОЙКИ ====================
 TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_ID = 8406317983
@@ -29,15 +30,22 @@ ADMIN_ID = 8406317983
 if TOKEN == "YOUR_BOT_TOKEN_HERE":
     raise ValueError("❌ Токен не найден!")
 
-REMINDER_HOUR = 23
+# Время по МСК
+MSK_TZ = pytz.timezone('Europe/Moscow')
+
+# Расписание
+REMINDER_HOUR = 23        # 23:59 МСК - напоминание о неотчете
 REMINDER_MINUTE = 59
+TASKS_RELEASE_HOUR = 23   # 23:59 МСК - выдача задач следующего дня
+TASKS_RELEASE_MINUTE = 59
+PREVIEW_BUTTON_HOUR = 18  # 18:30 МСК - показ кнопки предпросмотра
+PREVIEW_BUTTON_MINUTE = 30
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ==================== ПРОВЕРКА АДМИНА ====================
 def is_admin(user_id: int) -> bool:
-    """Проверка, является ли пользователь администратором"""
     return user_id == ADMIN_ID
 
 # ==================== БАЗА ДАННЫХ ====================
@@ -85,7 +93,7 @@ def db_add_user(user_id: int, username: str, first_name: str):
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, start_date, current_day, has_info_shown) VALUES (?, ?, ?, ?, ?, ?)",
-                    (user_id, username or "", first_name or "", datetime.now().isoformat(), 1, 0))
+                    (user_id, username or "", first_name or "", datetime.now(MSK_TZ).isoformat(), 1, 0))
         conn.commit()
         conn.close()
 
@@ -110,7 +118,7 @@ def db_update_last_task_date(user_id: int):
     with DB_LOCK:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("UPDATE users SET last_task_date = ? WHERE user_id = ?", (datetime.now().isoformat(), user_id))
+        cur.execute("UPDATE users SET last_task_date = ? WHERE user_id = ?", (datetime.now(MSK_TZ).isoformat(), user_id))
         conn.commit()
         conn.close()
 
@@ -118,7 +126,7 @@ def db_update_last_report_date(user_id: int):
     with DB_LOCK:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("UPDATE users SET last_report_date = ? WHERE user_id = ?", (datetime.now().isoformat(), user_id))
+        cur.execute("UPDATE users SET last_report_date = ? WHERE user_id = ?", (datetime.now(MSK_TZ).isoformat(), user_id))
         conn.commit()
         conn.close()
 
@@ -135,7 +143,7 @@ def db_save_report(user_id: int, day: int, completed: int, total: int, status: s
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("INSERT INTO daily_reports (user_id, day, report_date, tasks_completed, total_tasks, status) VALUES (?, ?, ?, ?, ?, ?)",
-                    (user_id, day, datetime.now().isoformat(), completed, total, status))
+                    (user_id, day, datetime.now(MSK_TZ).isoformat(), completed, total, status))
         conn.commit()
         conn.close()
 
@@ -172,7 +180,7 @@ def db_reset_user(user_id: int):
         cur = conn.cursor()
         cur.execute("DELETE FROM daily_reports WHERE user_id = ?", (user_id,))
         cur.execute("UPDATE users SET current_day = 1, last_task_date = NULL, last_report_date = NULL, completed_30 = 0, is_active = 1, start_date = ?, has_info_shown = 0 WHERE user_id = ?",
-                    (datetime.now().isoformat(), user_id))
+                    (datetime.now(MSK_TZ).isoformat(), user_id))
         conn.commit()
         conn.close()
     logger.info(f"Пользователь {user_id} полностью сброшен")
@@ -198,7 +206,7 @@ def db_set_info_shown(user_id: int):
 START_MESSAGE = """
 🌟 *Привет! Это твой личный спутник на ближайшие 30 дней.*
 
-Выполняя систему обязанностей, которую я буду высылать тебе каждый день в 18:00, ты изменишь свою жизнь на «до» и «после». Главное помнить: я просто бот, а мои создатели — просто люди, и никакого волшебства здесь нет. Всё зависит только от тебя и твоего желания измениться.
+Выполняя систему обязанностей, которую я буду высылать тебе каждый день в 23:59, ты изменишь свою жизнь на «до» и «после». Главное помнить: я просто бот, а мои создатели — просто люди, и никакого волшебства здесь нет. Всё зависит только от тебя и твоего желания измениться.
 
 Я не просто уверен — я знаю: наступит момент, когда станет очень тяжко. И тогда у тебя будет выбор: либо пройти отбор, не откладывая ни на секунду запланированные действия, либо сдаться. И если ты выберешь второе — попроси свой мозг напомнить тебе, что ты только что вошёл в 98% тех, кто сдаётся и не хочет покорять вершины, а только мечтает о них.
 
@@ -247,9 +255,9 @@ FINAL_MESSAGE = """
 """
 
 REMINDER_MESSAGE = """
-⚠️ *Ты забыл отчитаться о выполнении задач, надеюсь ты выполнил все!*
+⚠️ *Ты не отчитался о выполнении задач за сегодня!*
 
-*Вот тебе задачи на сегодня, не забудь отчитаться!*
+Пожалуйста, выполни задания и отправь отчет. Если ты уже выполнил — просто нажми кнопку с отчетом.
 """
 
 # ==================== ПОДДЕРЖКА ДЛЯ КЛЮЧЕВЫХ ДНЕЙ ====================
@@ -849,11 +857,40 @@ DAILY_TASKS[30] = {
 }
 
 # ==================== КНОПКИ ====================
-def get_main_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📋 Получить информацию")], [KeyboardButton(text="✅ Я ГОТОВ")]],
-        resize_keyboard=True
-    )
+def get_main_keyboard(user_id: int):
+    """Возвращает клавиатуру в зависимости от статуса пользователя"""
+    user_data = db_get_user(user_id)
+    
+    if not user_data:
+        # Новый пользователь
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="📋 Получить информацию")],
+                [KeyboardButton(text="✅ Я ГОТОВ")]
+            ],
+            resize_keyboard=True
+        )
+    
+    current_day = user_data[4]
+    completed_30 = user_data[8]
+    
+    if completed_30 == 1:
+        return types.ReplyKeyboardRemove()
+    
+    # Базовые кнопки
+    buttons = []
+    buttons.append([KeyboardButton(text="📋 Получить информацию")])
+    buttons.append([KeyboardButton(text="✅ Я ГОТОВ")])
+    
+    # Проверяем, можно ли показывать кнопку предпросмотра
+    has_report_today = db_get_report_status(user_id, current_day)
+    now = datetime.now(MSK_TZ)
+    is_after_1830 = now.hour >= PREVIEW_BUTTON_HOUR and now.minute >= PREVIEW_BUTTON_MINUTE
+    
+    if has_report_today or is_after_1830:
+        buttons.append([KeyboardButton(text="📅 Посмотреть задачи на завтра")])
+    
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 def get_report_keyboard(day: int):
     total = DAILY_TASKS[day]["total"]
@@ -899,6 +936,9 @@ bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
+# Хранилище активных предпросмотров
+active_previews = {}
+
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 
 @dp.message(Command("start"))
@@ -915,15 +955,23 @@ async def cmd_start(message: types.Message):
     completed_30 = user_data[8]
     
     if completed_30 == 1:
-        await message.answer("🎉 *Ты уже прошел марафон!*\n\nСпасибо, что был со мной эти 30 дней!", parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
+        await message.answer("🎉 *Ты уже прошел марафон!*", parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
         return
     
     if current_day > 1:
         has_report = db_get_report_status(user.id, current_day)
-        status = "✅ Ты уже отчитался за сегодня. Готов к следующему дню?" if has_report else "📝 У тебя есть задания на сегодня. Выполни их и отправь отчет."
-        await message.answer(f"👋 *С возвращением!*\n\nТы на *{current_day} дне* из 30.\n\n{status}\n\nНажми *«✅ Я ГОТОВ»*, чтобы продолжить.", parse_mode="Markdown", reply_markup=get_main_keyboard())
+        if has_report:
+            status = f"✅ *Ты уже отчитался за {current_day} день!*\n\nЗадачи на следующий день придут сегодня в 23:59 МСК."
+        else:
+            status = f"📝 *У тебя есть задания на {current_day} день.*\n\nВыполни их и отправь отчет."
+        
+        await message.answer(
+            f"👋 *С возвращением!*\n\nТы на *{current_day} дне* из 30.\n\n{status}",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard(message.from_user.id)
+        )
     else:
-        await message.answer(START_MESSAGE, parse_mode="Markdown", reply_markup=get_main_keyboard())
+        await message.answer(START_MESSAGE, parse_mode="Markdown", reply_markup=get_main_keyboard(message.from_user.id))
 
 @dp.message(Command("my_status"))
 async def my_status_command(message: types.Message):
@@ -953,7 +1001,7 @@ async def my_status_command(message: types.Message):
 async def get_info(message: types.Message):
     user_id = message.from_user.id
     db_set_info_shown(user_id)
-    await message.answer(INFO_MESSAGE, parse_mode="Markdown", reply_markup=get_main_keyboard())
+    await message.answer(INFO_MESSAGE, parse_mode="Markdown", reply_markup=get_main_keyboard(user_id))
 
 @dp.message(F.text == "✅ Я ГОТОВ")
 async def i_am_ready(message: types.Message):
@@ -968,30 +1016,109 @@ async def i_am_ready(message: types.Message):
     completed_30 = user_data[8]
     
     if completed_30 == 1:
-        await message.answer("🎉 *Ты уже завершил марафон!*\n\nСпасибо, что был со мной эти 30 дней!", parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
+        await message.answer("🎉 *Ты уже завершил марафон!*", parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
         return
     
     has_report = db_get_report_status(user_id, current_day)
     
-    if has_report:
-        next_day = current_day + 1
-        if next_day <= 30:
-            db_update_user_day(user_id, next_day)
-            day_tasks = DAILY_TASKS[next_day]
-            tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
-            tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
-            await message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(next_day))
-            db_update_last_task_date(user_id)
-        else:
-            db_complete_marathon(user_id)
-            await message.answer(FINAL_MESSAGE, parse_mode="Markdown")
-            await message.answer("🎉 *Марафон завершен!*\n\nСпасибо, что был со мной эти 30 дней!", parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
-    else:
+    # Если пользователь уже отчитался за сегодня и есть следующий день
+    if has_report and current_day < 30:
+        await message.answer(
+            f"✅ *Ты уже отчитался за {current_day} день!*\n\n"
+            f"📅 *Завтра* (День {current_day + 1}) в 23:59 МСК ты получишь новые задания.\n\n"
+            f"А пока можешь посмотреть, что ждёт тебя завтра, нажав кнопку *«📅 Посмотреть задачи на завтра»*.",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard(user_id)
+        )
+        return
+    
+    # Если пользователь на 30 дне и отчитался
+    if has_report and current_day == 30:
+        db_complete_marathon(user_id)
+        await message.answer(FINAL_MESSAGE, parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
+        return
+    
+    # Если пользователь не отчитался за сегодня - выдаем текущие задачи
+    if not has_report:
         day_tasks = DAILY_TASKS[current_day]
         tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
         tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
         await message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(current_day))
         db_update_last_task_date(user_id)
+        return
+
+@dp.message(F.text == "📅 Посмотреть задачи на завтра")
+async def show_next_day_tasks(message: types.Message):
+    user_id = message.from_user.id
+    user_data = db_get_user(user_id)
+    
+    if not user_data:
+        await message.answer("❌ Вы не зарегистрированы. Нажмите /start")
+        return
+    
+    current_day = user_data[4]
+    completed_30 = user_data[8]
+    
+    if completed_30 == 1:
+        await message.answer("🎉 *Ты уже завершил марафон!*", parse_mode="Markdown")
+        return
+    
+    if current_day >= 30:
+        await message.answer("🎉 *Это последний день марафона! Завтра уже не будет заданий.*", parse_mode="Markdown")
+        return
+    
+    next_day = current_day + 1
+    has_report_today = db_get_report_status(user_id, current_day)
+    now = datetime.now(MSK_TZ)
+    is_after_1830 = now.hour >= PREVIEW_BUTTON_HOUR and now.minute >= PREVIEW_BUTTON_MINUTE
+    
+    # Проверяем права на просмотр
+    if not has_report_today and not is_after_1830:
+        await message.answer(
+            f"🔒 *Предпросмотр задач на {next_day} день станет доступен:*\n\n"
+            f"✅ После того, как отчитаешься за сегодняшний день\n"
+            f"⏰ Или после 18:30 по МСК",
+            parse_mode="Markdown"
+        )
+        return
+    
+    next_day_tasks = DAILY_TASKS[next_day]
+    
+    # Создаем инлайн-клавиатуру для скрытия
+    hide_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Скрыть предпросмотр", callback_data="hide_preview")]
+        ]
+    )
+    
+    tasks_preview = f"🔮 *ПРЕДПРОСМОТР: День {next_day}*\n\n"
+    tasks_preview += f"*{next_day_tasks['title']}*\n\n"
+    tasks_preview += "📋 *Задания:*\n"
+    for i, task in enumerate(next_day_tasks["tasks"], 1):
+        tasks_preview += f"{i}. {task}\n\n"
+    tasks_preview += f"\n*Всего заданий: {next_day_tasks['total']}*\n\n"
+    tasks_preview += "💡 *Это предпросмотр. Официально задачи придут сегодня в 23:59 МСК.*"
+    
+    sent_msg = await message.answer(tasks_preview, parse_mode="Markdown", reply_markup=hide_keyboard)
+    
+    # Сохраняем ID сообщения
+    active_previews[user_id] = sent_msg.message_id
+
+@dp.callback_query(lambda c: c.data == "hide_preview")
+async def hide_preview(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    
+    # Удаляем сообщение
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    
+    # Удаляем из хранилища
+    if user_id in active_previews:
+        del active_previews[user_id]
+    
+    await callback.answer("✅ Предпросмотр скрыт")
 
 @dp.callback_query(lambda c: c.data.startswith('report_'))
 async def process_report(callback: types.CallbackQuery):
@@ -1018,10 +1145,6 @@ async def process_report(callback: types.CallbackQuery):
     if reported_day != current_day:
         await callback.answer(f"❌ Эта кнопка для дня {reported_day}, а вы на дне {current_day}", show_alert=True)
         await callback.message.delete()
-        return
-    
-    if not user_data[5]:
-        await callback.answer("Сначала нажми «✅ Я ГОТОВ», чтобы получить задачи!", show_alert=True)
         return
     
     if db_get_report_status(user_id, current_day):
@@ -1053,8 +1176,6 @@ async def process_report(callback: types.CallbackQuery):
         await asyncio.sleep(1)
         await callback.message.answer(SUPPORT_MESSAGES[current_day], parse_mode="Markdown")
         await asyncio.sleep(2)
-    else:
-        await asyncio.sleep(2)
     
     if current_day == 30:
         db_complete_marathon(user_id)
@@ -1062,16 +1183,136 @@ async def process_report(callback: types.CallbackQuery):
         await callback.answer()
         return
     
+    # Обновляем день пользователя (НО НЕ ВЫДАЕМ ЗАДАЧИ СРАЗУ)
     next_day = current_day + 1
     db_update_user_day(user_id, next_day)
     
-    day_tasks = DAILY_TASKS[next_day]
-    tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
-    tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
+    await callback.message.answer(
+        f"✅ *Отлично! Отчёт за {current_day} день принят!*\n\n"
+        f"📅 *Завтра* (День {next_day}) в 23:59 МСК ты получишь новые задания.\n\n"
+        f"А пока можешь посмотреть, что ждёт тебя завтра, нажав кнопку *«📅 Посмотреть задачи на завтра»*.",
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard(user_id)
+    )
     
-    await callback.message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(next_day))
-    db_update_last_task_date(user_id)
     await callback.answer()
+
+# ==================== ФОНОВЫЕ ЗАДАЧИ ====================
+
+async def check_reminders():
+    """Напоминание о неотчете в 23:59 МСК"""
+    last_check_date = None
+    
+    while True:
+        try:
+            now = datetime.now(MSK_TZ)
+            current_date = now.date()
+            
+            # Проверяем в 23:59
+            if now.hour == REMINDER_HOUR and now.minute >= REMINDER_MINUTE:
+                if last_check_date != current_date:
+                    last_check_date = current_date
+                    logger.info(f"Запуск проверки напоминаний на {current_date}")
+                    
+                    users = db_get_all_active_users()
+                    
+                    for user_id, current_day in users:
+                        try:
+                            has_report = db_get_report_status(user_id, current_day)
+                            
+                            if has_report:
+                                continue
+                            
+                            # Отправляем предупреждение
+                            await bot.send_message(
+                                user_id, 
+                                f"⚠️ *Ты не отчитался за {current_day} день марафона!*\n\n"
+                                f"Если ты выполнил задачи, пожалуйста, отправь отчет.\n\n"
+                                f"Если нет — ничего страшного, но лучше не пропускать дни!",
+                                parse_mode="Markdown"
+                            )
+                            
+                            # Повторно отправляем задачи
+                            day_tasks = DAILY_TASKS[current_day]
+                            tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
+                            tasks_text += f"\n\n*Выполни задачи и нажми одну из кнопок:*"
+                            
+                            await bot.send_message(
+                                user_id, 
+                                tasks_text, 
+                                parse_mode="Markdown", 
+                                reply_markup=get_report_keyboard(current_day)
+                            )
+                            
+                            logger.info(f"Напоминание отправлено пользователю {user_id} (день {current_day})")
+                            
+                        except Exception as e:
+                            logger.error(f"Ошибка при отправке напоминания пользователю {user_id}: {e}")
+            
+            await asyncio.sleep(30)
+            
+        except Exception as e:
+            logger.error(f"Критическая ошибка в check_reminders: {e}")
+            await asyncio.sleep(60)
+
+async def release_daily_tasks():
+    """Выдает задачи следующего дня в 23:59 МСК всем, кто отчитался"""
+    last_release_date = None
+    
+    while True:
+        try:
+            now = datetime.now(MSK_TZ)
+            current_date = now.date()
+            
+            # Проверяем, нужно ли выдавать задачи (23:59)
+            if now.hour == TASKS_RELEASE_HOUR and now.minute >= TASKS_RELEASE_MINUTE:
+                if last_release_date != current_date:
+                    last_release_date = current_date
+                    logger.info(f"Запуск выдачи задач на {current_date}")
+                    
+                    # Получаем всех активных пользователей
+                    users = db_get_all_active_users()
+                    
+                    for user_id, current_day in users:
+                        try:
+                            # Проверяем, отчитался ли пользователь за сегодня
+                            has_report_today = db_get_report_status(user_id, current_day)
+                            
+                            # Если отчитался и не последний день
+                            if has_report_today and current_day < 30:
+                                next_day = current_day
+                                
+                                # Выдаем задачи на текущий день (который уже стал следующим)
+                                day_tasks = DAILY_TASKS[next_day]
+                                tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
+                                tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
+                                
+                                await bot.send_message(
+                                    user_id, 
+                                    tasks_text, 
+                                    parse_mode="Markdown", 
+                                    reply_markup=get_report_keyboard(next_day)
+                                )
+                                db_update_last_task_date(user_id)
+                                logger.info(f"Задачи на день {next_day} выданы пользователю {user_id}")
+                            
+                            # Если пользователь на 30 дне и отчитался
+                            elif has_report_today and current_day == 30:
+                                # Ничего не выдаем, марафон завершен
+                                pass
+                            
+                            # Если не отчитался - ничего не выдаем
+                            else:
+                                logger.info(f"Пользователь {user_id} не отчитался за день {current_day}, задачи не выданы")
+                                
+                        except Exception as e:
+                            logger.error(f"Ошибка при выдаче задач пользователю {user_id}: {e}")
+            
+            await asyncio.sleep(30)
+            
+        except Exception as e:
+            logger.error(f"Критическая ошибка в release_daily_tasks: {e}")
+            await asyncio.sleep(60)
 
 # ==================== АДМИН-КОМАНДЫ ====================
 
@@ -1087,7 +1328,7 @@ async def admin_command(message: types.Message):
         await message.answer("📊 *Нет пользователей*", parse_mode="Markdown")
         return
     
-    active = [u for u in users if u[4] == 0]
+    active = [u for u in users if u[4] != 30 and u[4] == 0]
     completed = [u for u in users if u[4] == 1]
     
     text = "📊 *Панель администратора*\n\n"
@@ -1337,7 +1578,7 @@ async def stats_command(message: types.Message):
         await message.answer("Нет данных")
         return
     
-    active = [u for u in users if u[4] == 0]
+    active = [u for u in users if u[4] != 30 and u[4] == 0]
     completed = [u for u in users if u[4] == 1]
     
     day_counts = {}
@@ -1355,48 +1596,6 @@ async def stats_command(message: types.Message):
         text += f"День {day}: {day_counts[day]} пользователей\n"
     
     await message.answer(text, parse_mode="Markdown")
-
-# ==================== НАПОМИНАНИЯ ====================
-async def check_reminders():
-    last_check_date = None
-    
-    while True:
-        try:
-            now = datetime.now()
-            current_date = now.date()
-            
-            if now.hour == REMINDER_HOUR and now.minute >= REMINDER_MINUTE:
-                if last_check_date != current_date:
-                    last_check_date = current_date
-                    logger.info(f"Запуск проверки напоминаний на {current_date}")
-                    
-                    users = db_get_all_active_users()
-                    
-                    for user_id, current_day in users:
-                        try:
-                            has_report = db_get_report_status(user_id, current_day)
-                            
-                            if has_report:
-                                continue
-                            
-                            await bot.send_message(user_id, REMINDER_MESSAGE, parse_mode="Markdown")
-                            
-                            day_tasks = DAILY_TASKS[current_day]
-                            tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
-                            tasks_text += f"\n\n*Ты еще не отчитался за сегодня. Выполни задачи и нажми одну из кнопок:*"
-                            
-                            await bot.send_message(user_id, tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(current_day))
-                            
-                            logger.info(f"Напоминание отправлено пользователю {user_id} (день {current_day})")
-                            
-                        except Exception as e:
-                            logger.error(f"Ошибка при отправке напоминания пользователю {user_id}: {e}")
-            
-            await asyncio.sleep(30)
-            
-        except Exception as e:
-            logger.error(f"Критическая ошибка в check_reminders: {e}")
-            await asyncio.sleep(60)
 
 # ==================== ЗАПУСК ====================
 async def set_commands():
@@ -1425,6 +1624,7 @@ async def on_startup():
     init_db()
     await set_commands()
     asyncio.create_task(check_reminders())
+    asyncio.create_task(release_daily_tasks())
     logger.info("✅ Бот готов к работе!")
 
 async def on_shutdown():
