@@ -1,6 +1,6 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 8.2 - ИСПРАВЛЕННАЯ ЛОГИКА КНОПОК
+Версия: 8.3 - ИСПРАВЛЕННАЯ ЛОГИКА КНОПКИ ПРЕДПРОСМОТРА
 """
 
 import asyncio
@@ -210,15 +210,6 @@ def db_set_started_marathon(user_id: int):
         cur.execute("UPDATE users SET has_started_marathon = 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
-
-def db_has_started_marathon(user_id: int) -> bool:
-    with DB_LOCK:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT has_started_marathon FROM users WHERE user_id = ?", (user_id,))
-        result = cur.fetchone()
-        conn.close()
-        return result[0] == 1 if result else False
 
 # ==================== КОНТЕНТ (ТЕКСТЫ) ====================
 START_MESSAGE = """
@@ -896,21 +887,42 @@ def get_main_keyboard(user_id: int):
     if completed_30 == 1:
         return types.ReplyKeyboardRemove()
     
-    # Если пользователь уже начал марафон (есть отчеты) - показываем только предпросмотр
+    # Проверяем, начал ли пользователь марафон
     reports = db_get_user_reports(user_id)
     if len(reports) > 0 or has_started == 1:
-        # Уже в марафоне - только кнопка предпросмотра
+        # Уже в марафоне
         buttons = []
         
-        # Кнопка предпросмотра
-        has_report_today = db_get_report_status(user_id, current_day)
+        # Проверяем доступность кнопки предпросмотра
+        # Кнопка доступна если:
+        # 1. Пользователь отчитался за предыдущий день (текущий день - 1)
+        # 2. Или наступило 18:30 МСК
+        
+        previous_day = current_day - 1
+        has_report_previous = db_get_report_status(user_id, previous_day) if previous_day >= 1 else False
+        
         now = datetime.now(MSK_TZ)
         is_after_1830 = now.hour >= PREVIEW_BUTTON_HOUR and now.minute >= PREVIEW_BUTTON_MINUTE
         
-        if has_report_today or is_after_1830:
+        # Для первого дня (current_day = 1) - кнопка предпросмотра недоступна (еще нет следующего дня)
+        if current_day == 1:
+            can_show_preview = False
+        else:
+            # На остальных днях - проверяем отчет за предыдущий день ИЛИ время
+            can_show_preview = has_report_previous or is_after_1830
+        
+        if can_show_preview and current_day < 30:
             buttons.append([KeyboardButton(text="📅 Посмотреть задачи на завтра")])
         
-        return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True) if buttons else types.ReplyKeyboardRemove()
+        # ВСЕГДА показываем клавиатуру, даже если кнопка предпросмотра недоступна
+        if not buttons:
+            # Показываем информативную кнопку-заглушку
+            if current_day == 1:
+                buttons.append([KeyboardButton(text="📝 Сначала выполни задания 1 дня")])
+            else:
+                buttons.append([KeyboardButton(text=f"🔒 Предпросмотр после отчета за {previous_day} день")])
+        
+        return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
     
     # Новый пользователь, который еще не начал
     buttons = []
@@ -1147,16 +1159,33 @@ async def show_next_day_tasks(message: types.Message):
         return
     
     next_day = current_day + 1
-    has_report_today = db_get_report_status(user_id, current_day)
+    
+    # Проверяем доступность предпросмотра
+    previous_day = current_day - 1
+    has_report_previous = db_get_report_status(user_id, previous_day) if previous_day >= 1 else False
+    
     now = datetime.now(MSK_TZ)
     is_after_1830 = now.hour >= PREVIEW_BUTTON_HOUR and now.minute >= PREVIEW_BUTTON_MINUTE
     
-    # Проверяем права на просмотр
-    if not has_report_today and not is_after_1830:
+    # Для первого дня (current_day = 1) - предпросмотр недоступен
+    if current_day == 1:
         await message.answer(
-            f"🔒 *Предпросмотр задач на {next_day} день станет доступен:*\n\n"
-            f"✅ После того, как отчитаешься за сегодняшний день\n"
-            f"⏰ Или после 18:30 по МСК",
+            "📝 *Ты на первом дне марафона!*\n\n"
+            "Сначала выполни задания 1 дня и отправь отчет.\n"
+            "После этого станет доступен предпросмотр 2 дня.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    if not has_report_previous and not is_after_1830:
+        await message.answer(
+            f"🔒 *Предпросмотр задач на {next_day} день пока недоступен*\n\n"
+            f"📋 *Условия для появления кнопки:*\n"
+            f"{'✅ ' if has_report_previous else '❌ '}Отчитаться за {previous_day} день\n"
+            f"{'✅ ' if is_after_1830 else '❌ '}Наступление 18:30 по МСК\n\n"
+            f"*Твой текущий день:* {current_day}\n"
+            f"*Отчет за {previous_day} день:* {'✅ Есть' if has_report_previous else '❌ Нет'}\n"
+            f"*Текущее время:* {now.strftime('%H:%M')} МСК",
             parse_mode="Markdown"
         )
         return
@@ -1182,6 +1211,41 @@ async def show_next_day_tasks(message: types.Message):
     
     # Сохраняем ID сообщения
     active_previews[user_id] = sent_msg.message_id
+
+@dp.message(F.text.startswith("📝 Сначала выполни") | F.text.startswith("🔒 Предпросмотр после отчета"))
+async def placeholder_button(message: types.Message):
+    user_id = message.from_user.id
+    user_data = db_get_user(user_id)
+    
+    if not user_data:
+        await message.answer("❌ Ошибка. Нажмите /start")
+        return
+    
+    current_day = user_data[4]
+    previous_day = current_day - 1
+    
+    if current_day == 1:
+        await message.answer(
+            "📝 *Ты на первом дне марафона!*\n\n"
+            "Сначала выполни задания 1 дня и отправь отчет.\n"
+            "После этого станет доступен предпросмотр 2 дня.",
+            parse_mode="Markdown"
+        )
+    else:
+        has_report = db_get_report_status(user_id, previous_day)
+        now = datetime.now(MSK_TZ)
+        is_after_1830 = now.hour >= PREVIEW_BUTTON_HOUR and now.minute >= PREVIEW_BUTTON_MINUTE
+        
+        await message.answer(
+            f"🔒 *Предпросмотр задач на {current_day + 1} день пока недоступен*\n\n"
+            f"📋 *Условия для появления кнопки:*\n"
+            f"{'✅ ' if has_report else '❌ '}Отчитаться за {previous_day} день\n"
+            f"{'✅ ' if is_after_1830 else '❌ '}Наступление 18:30 по МСК\n\n"
+            f"*Твой текущий день:* {current_day}\n"
+            f"*Отчет за {previous_day} день:* {'✅ Есть' if has_report else '❌ Нет'}\n"
+            f"*Текущее время:* {now.strftime('%H:%M')} МСК",
+            parse_mode="Markdown"
+        )
 
 @dp.callback_query(lambda c: c.data == "hide_preview")
 async def hide_preview(callback: types.CallbackQuery):
