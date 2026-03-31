@@ -1,6 +1,6 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 9.1 - ОПТИМИЗИРОВАННЫЙ
+Версия: 9.2 - С КНОПКОЙ "ЗАДАЧИ НА СЕГОДНЯ"
 """
 
 import asyncio
@@ -20,7 +20,6 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
-from aiogram.client.session.aiohttp import AiohttpSession
 
 import pytz
 
@@ -885,6 +884,7 @@ DAILY_TASKS[30] = {
 
 # ==================== КНОПКИ ====================
 def get_start_keyboard():
+    """Клавиатура для нового пользователя (до старта марафона)"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📋 Получить информацию")],
@@ -894,10 +894,11 @@ def get_start_keyboard():
     )
 
 def get_main_menu_keyboard():
+    """Главное меню для активных участников"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📊 МОЙ СТАТУС"), KeyboardButton(text="📅 ЗАДАЧИ НА ЗАВТРА")],
-            [KeyboardButton(text="💬 ЕСЛИ ВОЗНИКЛИ ПРОБЛЕМЫ С БОТОМ")]
+            [KeyboardButton(text="📋 ЗАДАЧИ НА СЕГОДНЯ"), KeyboardButton(text="💬 ЕСЛИ ВОЗНИКЛИ ПРОБЛЕМЫ С БОТОМ")]
         ],
         resize_keyboard=True
     )
@@ -1071,7 +1072,8 @@ async def i_am_ready(message: types.Message):
     await message.answer(
         "🎯 *Марафон начался!*\n\n"
         "Теперь у тебя будет главное меню.\n"
-        "Кнопка «📅 ЗАДАЧИ НА ЗАВТРА» станет доступна после отчета или после 18:30.",
+        "Кнопка «📅 ЗАДАЧИ НА ЗАВТРА» станет доступна после отчета или после 18:30.\n"
+        "Кнопка «📋 ЗАДАЧИ НА СЕГОДНЯ» покажет задания текущего дня.",
         parse_mode="Markdown",
         reply_markup=get_main_menu_keyboard()
     )
@@ -1180,6 +1182,58 @@ async def show_next_day_tasks(message: types.Message):
     
     sent_msg = await message.answer(tasks_preview, parse_mode="Markdown", reply_markup=get_hide_preview_keyboard())
     active_previews[user_id] = sent_msg.message_id
+
+@dp.message(F.text == "📋 ЗАДАЧИ НА СЕГОДНЯ")
+async def show_today_tasks(message: types.Message):
+    user_id = message.from_user.id
+    user_data = db_get_user(user_id)
+    
+    if not user_data:
+        await message.answer("❌ Вы не зарегистрированы. Нажмите /start")
+        return
+    
+    current_day = user_data[4]
+    completed_30 = user_data[8]
+    has_started = user_data[10] if len(user_data) > 10 else 0
+    
+    reports = db_get_user_reports(user_id)
+    if len(reports) == 0 and has_started == 0:
+        await message.answer(
+            "⚠️ *Ты еще не начал марафон!*\n\n"
+            "Сначала нажми «Получить информацию», а затем «Я готов».",
+            parse_mode="Markdown"
+        )
+        return
+    
+    if completed_30 == 1:
+        await message.answer("🎉 *Ты уже завершил марафон!*", parse_mode="Markdown")
+        return
+    
+    # Проверяем, отчитался ли пользователь за сегодня
+    has_report = db_get_report_status(user_id, current_day)
+    
+    if has_report:
+        if current_day == 30:
+            await message.answer(
+                "🎉 *Ты уже завершил марафон!*\n\n"
+                "Спасибо, что прошел этот путь до конца!",
+                parse_mode="Markdown"
+            )
+        else:
+            await message.answer(
+                f"✅ *Ты уже отчитался за {current_day} день!*\n\n"
+                f"📅 Завтра (День {current_day + 1}) в 23:59 МСК ты получишь новые задания.\n\n"
+                f"А пока можешь посмотреть, что ждёт тебя завтра, нажав кнопку *«📅 ЗАДАЧИ НА ЗАВТРА»*.",
+                parse_mode="Markdown"
+            )
+        return
+    
+    # Показываем задачи на сегодня
+    day_tasks = DAILY_TASKS[current_day]
+    tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
+    tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
+    
+    await message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(current_day))
 
 @dp.message(F.text == "💬 ЕСЛИ ВОЗНИКЛИ ПРОБЛЕМЫ С БОТОМ")
 async def report_problem(message: types.Message):
@@ -1323,7 +1377,8 @@ async def process_report(callback: types.CallbackQuery):
     await callback.message.answer(
         f"✅ *Отлично! Отчёт за {current_day} день принят!*\n\n"
         f"📅 *Завтра* (День {next_day}) в 23:59 МСК ты получишь новые задания.\n\n"
-        f"А пока можешь посмотреть, что ждёт тебя завтра, нажав кнопку *«📅 ЗАДАЧИ НА ЗАВТРА»*.",
+        f"А пока можешь посмотреть, что ждёт тебя завтра, нажав кнопку *«📅 ЗАДАЧИ НА ЗАВТРА»*, "
+        f"или повторить задания сегодняшнего дня через *«📋 ЗАДАЧИ НА СЕГОДНЯ»*.",
         parse_mode="Markdown",
         reply_markup=get_main_menu_keyboard()
     )
