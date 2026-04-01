@@ -1,6 +1,6 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 9.3 - ИСПРАВЛЕННАЯ ЛОГИКА КНОПОК И АДМИН-КОМАНД
+Версия: 9.4 - ИСПРАВЛЕННЫЕ АДМИН-КОМАНДЫ И УПРАВЛЕНИЕ СООБЩЕНИЯМИ
 """
 
 import asyncio
@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import os
 from datetime import datetime
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -38,6 +38,9 @@ TASKS_RELEASE_HOUR = 23
 TASKS_RELEASE_MINUTE = 59
 PREVIEW_BUTTON_HOUR = 18
 PREVIEW_BUTTON_MINUTE = 30
+
+# Время авто-удаления временных сообщений (секунд)
+AUTO_DELETE_TIME = 10
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -234,6 +237,17 @@ def escape_markdown(text: str) -> str:
     for ch in chars:
         text = text.replace(ch, f'\\{ch}')
     return text
+
+async def delete_message_after_delay(message: types.Message, delay: int = AUTO_DELETE_TIME):
+    """Удаляет сообщение через указанное количество секунд"""
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except:
+        pass
+
+# ==================== ХРАНИЛИЩА СООБЩЕНИЙ ====================
+user_task_messages: Dict[int, int] = {}  # user_id -> message_id (последнее сообщение с задачами)
 
 # ==================== КОНТЕНТ (ТЕКСТЫ) ====================
 START_MESSAGE = """
@@ -1017,6 +1031,38 @@ async def cmd_start(message: types.Message):
     else:
         await message.answer(START_MESSAGE, parse_mode="Markdown", reply_markup=get_start_keyboard())
 
+@dp.message(Command("my_status"))
+async def my_status_command(message: types.Message):
+    """Команда /my_status - показывает статус пользователя"""
+    user_id = message.from_user.id
+    user_data = db_get_user(user_id)
+    
+    if not user_data:
+        await message.answer("❌ Вы не зарегистрированы. Нажмите /start")
+        return
+    
+    current_day = user_data[4]
+    completed_30 = user_data[8]
+    reports = db_get_user_reports(user_id)
+    
+    avg_score = get_avg_score(reports)
+    progress_bar = get_progress_bar(current_day)
+    days_left = 30 - current_day
+    
+    status_text = f"📊 *Ваш статус в марафоне*\n\n"
+    status_text += f"📅 *День:* {current_day} из 30\n"
+    status_text += f"{progress_bar} {current_day}/30\n\n"
+    status_text += f"✅ *Завершил марафон:* {'Да' if completed_30 == 1 else 'Нет'}\n"
+    status_text += f"📝 *Всего отчетов:* {len(reports)}\n"
+    status_text += f"⭐ *Средняя оценка:* {avg_score:.1f}/5\n"
+    status_text += f"⏳ *Осталось дней:* {days_left}\n"
+    
+    if reports:
+        last_day, last_status, _ = reports[-1]
+        status_text += f"📋 *Последний отчет:* день {last_day}, статус {last_status}\n"
+    
+    await message.answer(status_text, parse_mode="Markdown")
+
 @dp.message(F.text == "📋 Получить информацию")
 async def get_info(message: types.Message):
     user_id = message.from_user.id
@@ -1083,7 +1129,8 @@ async def i_am_ready(message: types.Message):
     tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
     tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
     
-    await message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(1))
+    sent_msg = await message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(1))
+    user_task_messages[user_id] = sent_msg.message_id
     db_update_last_task_date(user_id)
     
     await message.answer(
@@ -1164,9 +1211,6 @@ async def show_next_day_tasks(message: types.Message):
     now = datetime.now(MSK_TZ)
     is_after_1830 = now.hour >= PREVIEW_BUTTON_HOUR and now.minute >= PREVIEW_BUTTON_MINUTE
     
-    # Условия для показа предпросмотра:
-    # 1. Пользователь отчитался за текущий день
-    # 2. ИЛИ наступило 18:30
     if not has_report_today and not is_after_1830:
         await message.answer(
             f"🔒 *Предпросмотр задач на {next_day} день пока недоступен*\n\n"
@@ -1226,21 +1270,26 @@ async def show_today_tasks(message: types.Message):
     # Проверяем, отчитался ли пользователь за сегодня
     has_report = db_get_report_status(user_id, current_day)
     
-    if has_report:
-        await message.answer(
-            f"ℹ️ *Вы уже отчитались за {current_day} день!*\n\n"
-            f"📅 Завтра (День {current_day + 1}) в 23:59 МСК вы получите новые задания.\n\n"
-            f"А пока можете посмотреть, что ждёт вас завтра, нажав кнопку *«📅 ЗАДАЧИ НА ЗАВТРА»*.",
-            parse_mode="Markdown"
-        )
-        return
+    # Удаляем предыдущее сообщение с задачами, если оно есть
+    if user_id in user_task_messages:
+        try:
+            await bot.delete_message(user_id, user_task_messages[user_id])
+        except:
+            pass
+        del user_task_messages[user_id]
     
-    # Показываем задачи на сегодня
     day_tasks = DAILY_TASKS[current_day]
     tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
-    tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
     
-    await message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(current_day))
+    if has_report:
+        tasks_text += f"\n\n*ℹ️ Вы уже отчитались за {current_day} день.*\n\n"
+        tasks_text += f"📅 Завтра (День {current_day + 1}) в 23:59 МСК вы получите новые задания.\n\n"
+        tasks_text += f"А пока можете посмотреть, что ждёт вас завтра, нажав кнопку *«📅 ЗАДАЧИ НА ЗАВТРА»*."
+        sent_msg = await message.answer(tasks_text, parse_mode="Markdown")
+    else:
+        tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
+        sent_msg = await message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(current_day))
+        user_task_messages[user_id] = sent_msg.message_id
 
 @dp.message(F.text == "💬 ЕСЛИ ВОЗНИКЛИ ПРОБЛЕМЫ С БОТОМ")
 async def report_problem(message: types.Message):
@@ -1265,7 +1314,8 @@ async def cancel_report(callback: types.CallbackQuery):
     
     await callback.message.delete()
     await callback.answer("Отправка отменена", show_alert=False)
-    await callback.message.answer("✅ *Отправка отменена.*", parse_mode="Markdown")
+    msg = await callback.message.answer("✅ *Отправка отменена.*", parse_mode="Markdown")
+    asyncio.create_task(delete_message_after_delay(msg))
 
 @dp.message()
 async def handle_problem_message(message: types.Message):
@@ -1283,7 +1333,6 @@ async def handle_problem_message(message: types.Message):
     username = message.from_user.username
     first_name = message.from_user.first_name
     
-    # Экранируем username для Markdown
     safe_username = escape_markdown(username) if username else "нет"
     
     admin_message = (
@@ -1297,17 +1346,19 @@ async def handle_problem_message(message: types.Message):
     
     try:
         await bot.send_message(ADMIN_ID, admin_message, parse_mode="Markdown")
-        await message.answer(
+        msg = await message.answer(
             "✅ *Сообщение отправлено администратору.*\n\nМы свяжемся с вами в ближайшее время.",
             parse_mode="Markdown"
         )
+        asyncio.create_task(delete_message_after_delay(msg, 5))
         logger.info(f"Проблема от {user_id} отправлена админу")
     except Exception as e:
         logger.error(f"Ошибка при отправке сообщения админу: {e}")
-        await message.answer(
+        msg = await message.answer(
             "❌ *Не удалось отправить сообщение.* Попробуйте позже.",
             parse_mode="Markdown"
         )
+        asyncio.create_task(delete_message_after_delay(msg, 5))
 
 @dp.callback_query(lambda c: c.data == "hide_preview")
 async def hide_preview(callback: types.CallbackQuery):
@@ -1365,7 +1416,16 @@ async def process_report(callback: types.CallbackQuery):
     db_save_report(user_id, current_day, completed, DAILY_TASKS[current_day]["total"], report_key)
     db_update_last_report_date(user_id)
     
+    # Удаляем сообщение с кнопками
     await callback.message.delete()
+    
+    # Удаляем сохраненное сообщение с задачами, если есть
+    if user_id in user_task_messages:
+        try:
+            await bot.delete_message(user_id, user_task_messages[user_id])
+        except:
+            pass
+        del user_task_messages[user_id]
     
     feedback_text = FEEDBACK_MESSAGES[current_day].get(report_key, f"✅ Отчет за день {current_day} принят! Ты молодец! 🔥")
     
@@ -1394,108 +1454,6 @@ async def process_report(callback: types.CallbackQuery):
     )
     
     await callback.answer()
-
-# ==================== ФОНОВЫЕ ЗАДАЧИ ====================
-
-async def check_reminders():
-    """Напоминание о неотчете в 23:59 МСК"""
-    last_check_date = None
-    
-    while True:
-        try:
-            now = datetime.now(MSK_TZ)
-            current_date = now.date()
-            
-            if now.hour == REMINDER_HOUR and now.minute >= REMINDER_MINUTE:
-                if last_check_date != current_date:
-                    last_check_date = current_date
-                    logger.info(f"Запуск проверки напоминаний на {current_date}")
-                    
-                    users = db_get_all_active_users()
-                    
-                    for user_id, current_day in users:
-                        try:
-                            has_report = db_get_report_status(user_id, current_day)
-                            if has_report:
-                                continue
-                            
-                            await bot.send_message(
-                                user_id, 
-                                REMINDER_MESSAGE,
-                                parse_mode="Markdown"
-                            )
-                            
-                            day_tasks = DAILY_TASKS[current_day]
-                            tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
-                            tasks_text += f"\n\n*Выполни задачи и нажми одну из кнопок:*"
-                            
-                            await bot.send_message(
-                                user_id, 
-                                tasks_text, 
-                                parse_mode="Markdown", 
-                                reply_markup=get_report_keyboard(current_day)
-                            )
-                            
-                            logger.info(f"Напоминание отправлено пользователю {user_id} (день {current_day})")
-                            
-                        except Exception as e:
-                            logger.error(f"Ошибка при отправке напоминания пользователю {user_id}: {e}")
-            
-            await asyncio.sleep(30)
-            
-        except Exception as e:
-            logger.error(f"Критическая ошибка в check_reminders: {e}")
-            await asyncio.sleep(60)
-
-async def release_daily_tasks():
-    """Выдает задачи в 23:59 МСК всем, кто отчитался за текущий день"""
-    last_release_date = None
-    
-    while True:
-        try:
-            now = datetime.now(MSK_TZ)
-            current_date = now.date()
-            
-            if now.hour == TASKS_RELEASE_HOUR and now.minute >= TASKS_RELEASE_MINUTE:
-                if last_release_date != current_date:
-                    last_release_date = current_date
-                    logger.info(f"Запуск выдачи задач на {current_date}")
-                    
-                    users = db_get_all_active_users()
-                    
-                    for user_id, current_day in users:
-                        try:
-                            if current_day == 1:
-                                continue
-                            
-                            # Проверяем, отчитался ли пользователь за предыдущий день
-                            previous_day = current_day - 1
-                            has_report_previous = db_get_report_status(user_id, previous_day)
-                            
-                            if has_report_previous and current_day <= 30:
-                                day_tasks = DAILY_TASKS[current_day]
-                                tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
-                                tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
-                                
-                                await bot.send_message(
-                                    user_id, 
-                                    tasks_text, 
-                                    parse_mode="Markdown", 
-                                    reply_markup=get_report_keyboard(current_day)
-                                )
-                                db_update_last_task_date(user_id)
-                                logger.info(f"✅ Задачи на день {current_day} выданы пользователю {user_id}")
-                            else:
-                                logger.info(f"⚠️ Пользователь {user_id} не отчитался за день {previous_day}, задачи на день {current_day} не выданы")
-                                
-                        except Exception as e:
-                            logger.error(f"Ошибка при выдаче задач пользователю {user_id}: {e}")
-            
-            await asyncio.sleep(30)
-            
-        except Exception as e:
-            logger.error(f"Критическая ошибка в release_daily_tasks: {e}")
-            await asyncio.sleep(60)
 
 # ==================== АДМИН-КОМАНДЫ ====================
 
@@ -1779,6 +1737,107 @@ async def stats_command(message: types.Message):
         text += f"День {day}: {day_counts[day]} пользователей\n"
     
     await message.answer(text, parse_mode="Markdown")
+
+# ==================== ФОНОВЫЕ ЗАДАЧИ ====================
+
+async def check_reminders():
+    """Напоминание о неотчете в 23:59 МСК"""
+    last_check_date = None
+    
+    while True:
+        try:
+            now = datetime.now(MSK_TZ)
+            current_date = now.date()
+            
+            if now.hour == REMINDER_HOUR and now.minute >= REMINDER_MINUTE:
+                if last_check_date != current_date:
+                    last_check_date = current_date
+                    logger.info(f"Запуск проверки напоминаний на {current_date}")
+                    
+                    users = db_get_all_active_users()
+                    
+                    for user_id, current_day in users:
+                        try:
+                            has_report = db_get_report_status(user_id, current_day)
+                            if has_report:
+                                continue
+                            
+                            await bot.send_message(
+                                user_id, 
+                                REMINDER_MESSAGE,
+                                parse_mode="Markdown"
+                            )
+                            
+                            day_tasks = DAILY_TASKS[current_day]
+                            tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
+                            tasks_text += f"\n\n*Выполни задачи и нажми одну из кнопок:*"
+                            
+                            await bot.send_message(
+                                user_id, 
+                                tasks_text, 
+                                parse_mode="Markdown", 
+                                reply_markup=get_report_keyboard(current_day)
+                            )
+                            
+                            logger.info(f"Напоминание отправлено пользователю {user_id} (день {current_day})")
+                            
+                        except Exception as e:
+                            logger.error(f"Ошибка при отправке напоминания пользователю {user_id}: {e}")
+            
+            await asyncio.sleep(30)
+            
+        except Exception as e:
+            logger.error(f"Критическая ошибка в check_reminders: {e}")
+            await asyncio.sleep(60)
+
+async def release_daily_tasks():
+    """Выдает задачи в 23:59 МСК всем, кто отчитался за предыдущий день"""
+    last_release_date = None
+    
+    while True:
+        try:
+            now = datetime.now(MSK_TZ)
+            current_date = now.date()
+            
+            if now.hour == TASKS_RELEASE_HOUR and now.minute >= TASKS_RELEASE_MINUTE:
+                if last_release_date != current_date:
+                    last_release_date = current_date
+                    logger.info(f"Запуск выдачи задач на {current_date}")
+                    
+                    users = db_get_all_active_users()
+                    
+                    for user_id, current_day in users:
+                        try:
+                            if current_day == 1:
+                                continue
+                            
+                            previous_day = current_day - 1
+                            has_report_previous = db_get_report_status(user_id, previous_day)
+                            
+                            if has_report_previous and current_day <= 30:
+                                day_tasks = DAILY_TASKS[current_day]
+                                tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
+                                tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
+                                
+                                await bot.send_message(
+                                    user_id, 
+                                    tasks_text, 
+                                    parse_mode="Markdown", 
+                                    reply_markup=get_report_keyboard(current_day)
+                                )
+                                db_update_last_task_date(user_id)
+                                logger.info(f"✅ Задачи на день {current_day} выданы пользователю {user_id}")
+                            else:
+                                logger.info(f"⚠️ Пользователь {user_id} не отчитался за день {previous_day}, задачи на день {current_day} не выданы")
+                                
+                        except Exception as e:
+                            logger.error(f"Ошибка при выдаче задач пользователю {user_id}: {e}")
+            
+            await asyncio.sleep(30)
+            
+        except Exception as e:
+            logger.error(f"Критическая ошибка в release_daily_tasks: {e}")
+            await asyncio.sleep(60)
 
 # ==================== ЗАПУСК ====================
 async def set_commands():
