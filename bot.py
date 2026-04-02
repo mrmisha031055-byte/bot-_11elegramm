@@ -1,6 +1,6 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 10.0 - ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ
+Версия: 11.0 - ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ
 """
 
 import asyncio
@@ -244,9 +244,27 @@ async def delete_message_after_delay(message: types.Message, delay: int = AUTO_D
         pass
 
 # ==================== ХРАНИЛИЩА СООБЩЕНИЙ ====================
-user_task_messages: Dict[int, int] = {}
-active_previews: Dict[int, int] = {}
-waiting_for_problem: Dict[int, bool] = {}
+user_task_messages: Dict[int, int] = {}  # user_id -> message_id (последнее сообщение с задачами)
+active_previews: Dict[int, int] = {}     # user_id -> message_id (сообщение с предпросмотром)
+waiting_for_problem: Dict[int, bool] = {} # user_id -> ожидает отправки проблемы
+last_user_message: Dict[int, int] = {}    # user_id -> message_id (последнее сообщение пользователя)
+last_bot_message: Dict[int, int] = {}     # user_id -> message_id (последнее сообщение бота)
+
+async def delete_previous_messages(user_id: int):
+    """Удаляет предыдущие сообщения пользователя и бота"""
+    if user_id in last_user_message:
+        try:
+            await bot.delete_message(user_id, last_user_message[user_id])
+        except:
+            pass
+        del last_user_message[user_id]
+    
+    if user_id in last_bot_message:
+        try:
+            await bot.delete_message(user_id, last_bot_message[user_id])
+        except:
+            pass
+        del last_bot_message[user_id]
 
 # ==================== КОНТЕНТ (ТЕКСТЫ) ====================
 START_MESSAGE = """
@@ -1045,7 +1063,12 @@ async def my_status_command(message: types.Message):
         last_day, last_status, _ = reports[-1]
         status_text += f"📋 *Последний отчет:* день {last_day}, статус {last_status}\n"
     
-    await message.answer(status_text, parse_mode="Markdown")
+    # Сохраняем ID сообщения пользователя и бота для последующего удаления
+    if message.message_id:
+        last_user_message[user_id] = message.message_id
+    
+    sent_msg = await message.answer(status_text, parse_mode="Markdown")
+    last_bot_message[user_id] = sent_msg.message_id
 
 @dp.message(F.text == "📋 Получить информацию")
 async def get_info(message: types.Message):
@@ -1135,6 +1158,9 @@ async def show_status(message: types.Message):
         await message.answer("❌ Вы не зарегистрированы. Нажмите /start")
         return
     
+    # Удаляем предыдущие сообщения пользователя и бота
+    await delete_previous_messages(user_id)
+    
     current_day = user_data[4]
     completed_30 = user_data[8]
     reports = db_get_user_reports(user_id)
@@ -1155,7 +1181,11 @@ async def show_status(message: types.Message):
         last_day, last_status, _ = reports[-1]
         status_text += f"📋 *Последний отчет:* день {last_day}, статус {last_status}\n"
     
-    await message.answer(status_text, parse_mode="Markdown")
+    # Сохраняем ID сообщения пользователя и бота
+    last_user_message[user_id] = message.message_id
+    
+    sent_msg = await message.answer(status_text, parse_mode="Markdown")
+    last_bot_message[user_id] = sent_msg.message_id
 
 @dp.message(F.text == "📅 ЗАДАЧИ НА ЗАВТРА")
 async def show_next_day_tasks(message: types.Message):
@@ -1165,6 +1195,9 @@ async def show_next_day_tasks(message: types.Message):
     if not user_data:
         await message.answer("❌ Вы не зарегистрированы. Нажмите /start")
         return
+    
+    # Удаляем предыдущие сообщения пользователя и бота
+    await delete_previous_messages(user_id)
     
     current_day = user_data[4]
     completed_30 = user_data[8]
@@ -1189,51 +1222,44 @@ async def show_next_day_tasks(message: types.Message):
     
     next_day = current_day + 1
     
-    # Ключевое исправление: проверяем отчет за ПРЕДЫДУЩИЙ день
-    # Чтобы увидеть задачи на день 2, нужно отчитаться за день 1
-    previous_day = current_day - 1
-    has_report_previous = db_get_report_status(user_id, previous_day) if previous_day >= 1 else False
+    # Проверяем, отчитался ли пользователь за текущий день
+    has_report_today = db_get_report_status(user_id, current_day)
     
     now = datetime.now(MSK_TZ)
     is_after_1830 = now.hour >= PREVIEW_BUTTON_HOUR and now.minute >= PREVIEW_BUTTON_MINUTE
     
-    # Для дня 1: проверяем отчет за день 1
-    if current_day == 1:
-        has_report_required = db_get_report_status(user_id, 1)
-        required_day = 1
-    else:
-        has_report_required = has_report_previous
-        required_day = previous_day
-    
-    if not has_report_required and not is_after_1830:
+    if not has_report_today and not is_after_1830:
         await message.answer(
             f"🔒 *Предпросмотр задач на {next_day} день пока недоступен*\n\n"
             f"📋 *Условия для появления кнопки:*\n"
-            f"{'✅ ' if has_report_required else '❌ '}Отчитаться за {required_day} день\n"
+            f"{'✅ ' if has_report_today else '❌ '}Отчитаться за {current_day} день\n"
             f"{'✅ ' if is_after_1830 else '❌ '}Наступление 18:30 по МСК\n\n"
             f"*Твой текущий день:* {current_day}\n"
-            f"*Отчет за {required_day} день:* {'✅ Есть' if has_report_required else '❌ Нет'}\n"
+            f"*Отчет за сегодня:* {'✅ Есть' if has_report_today else '❌ Нет'}\n"
             f"*Текущее время:* {now.strftime('%H:%M')} МСК",
             parse_mode="Markdown"
         )
         return
     
     next_day_tasks = DAILY_TASKS[next_day]
+    
+    # Полный список задач (не сокращенный)
     tasks_preview = f"🔮 *ПРЕДПРОСМОТР: День {next_day}*\n\n"
     tasks_preview += f"*{next_day_tasks['title']}*\n\n"
-    tasks_preview += "📋 *Задания:*\n"
-    for i, task in enumerate(next_day_tasks["tasks"][:3], 1):
-        task_short = task.split("\n")[0] if "\n" in task else task
-        tasks_preview += f"{i}. {task_short[:80]}...\n"
-    
-    if len(next_day_tasks["tasks"]) > 3:
-        tasks_preview += f"\n*... и еще {len(next_day_tasks['tasks']) - 3} заданий*\n"
-    
+    tasks_preview += "📋 *Задания:*\n\n"
+    for i, task in enumerate(next_day_tasks["tasks"], 1):
+        tasks_preview += f"{i}. {task}\n\n"
     tasks_preview += f"\n*Всего заданий: {next_day_tasks['total']}*\n\n"
-    tasks_preview += "💡 *Это предпросмотр. Официально задачи придут сегодня в 23:59 МСК.*"
+    tasks_preview += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    tasks_preview += "⚠️ *Это предпросмотр!* Выполнить эти задания нельзя.\n"
+    tasks_preview += "📅 Официально задачи придут сегодня в 23:59 МСК."
+    
+    # Сохраняем ID сообщения пользователя
+    last_user_message[user_id] = message.message_id
     
     sent_msg = await message.answer(tasks_preview, parse_mode="Markdown", reply_markup=get_hide_preview_keyboard())
     active_previews[user_id] = sent_msg.message_id
+    last_bot_message[user_id] = sent_msg.message_id
 
 @dp.message(F.text == "📋 ЗАДАЧИ НА СЕГОДНЯ")
 async def show_today_tasks(message: types.Message):
@@ -1243,6 +1269,9 @@ async def show_today_tasks(message: types.Message):
     if not user_data:
         await message.answer("❌ Вы не зарегистрированы. Нажмите /start")
         return
+    
+    # Удаляем предыдущие сообщения пользователя и бота
+    await delete_previous_messages(user_id)
     
     current_day = user_data[4]
     completed_30 = user_data[8]
@@ -1274,29 +1303,40 @@ async def show_today_tasks(message: types.Message):
     day_tasks = DAILY_TASKS[current_day]
     tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
     
+    # Сохраняем ID сообщения пользователя
+    last_user_message[user_id] = message.message_id
+    
     if has_report:
         tasks_text += f"\n\n*ℹ️ Вы уже отчитались за {current_day} день.*\n\n"
         tasks_text += f"📅 Завтра (День {current_day + 1}) в 23:59 МСК вы получите новые задания.\n\n"
         tasks_text += f"А пока можете посмотреть, что ждёт вас завтра, нажав кнопку *«📅 ЗАДАЧИ НА ЗАВТРА»*."
-        await message.answer(tasks_text, parse_mode="Markdown")
+        sent_msg = await message.answer(tasks_text, parse_mode="Markdown")
+        last_bot_message[user_id] = sent_msg.message_id
     else:
         tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
         sent_msg = await message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(current_day))
         user_task_messages[user_id] = sent_msg.message_id
+        last_bot_message[user_id] = sent_msg.message_id
 
 @dp.message(F.text == "💬 ЕСЛИ ВОЗНИКЛИ ПРОБЛЕМЫ С БОТОМ")
 async def report_problem(message: types.Message):
     user_id = message.from_user.id
     
+    # Удаляем предыдущие сообщения пользователя и бота
+    await delete_previous_messages(user_id)
+    
     waiting_for_problem[user_id] = True
     
-    await message.answer(
+    last_user_message[user_id] = message.message_id
+    
+    sent_msg = await message.answer(
         "💬 *Напишите вашу проблему*\n\n"
         "Опишите подробно, что случилось.\n\n"
         "*Сообщение будет отправлено администратору.*",
         parse_mode="Markdown",
         reply_markup=get_cancel_keyboard()
     )
+    last_bot_message[user_id] = sent_msg.message_id
 
 @dp.callback_query(lambda c: c.data == "cancel_report")
 async def cancel_report(callback: types.CallbackQuery):
@@ -1357,10 +1397,19 @@ async def handle_problem_message(message: types.Message):
 async def hide_preview(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     
+    # Удаляем сообщение с предпросмотром
     try:
         await callback.message.delete()
     except:
         pass
+    
+    # Также удаляем сообщение пользователя, которое вызвало этот предпросмотр
+    if user_id in last_user_message:
+        try:
+            await bot.delete_message(user_id, last_user_message[user_id])
+        except:
+            pass
+        del last_user_message[user_id]
     
     if user_id in active_previews:
         del active_previews[user_id]
@@ -1462,28 +1511,24 @@ async def admin_command(message: types.Message):
         await message.answer("📊 *Нет пользователей*", parse_mode="Markdown")
         return
     
-    active = [u for u in users if u[4] != 30 and u[4] == 0]
-    completed = [u for u in users if u[4] == 1]
+    text = "📊 *СПИСОК ПОЛЬЗОВАТЕЛЕЙ*\n\n"
+    text += "┌─────┬────────────────────────────┬─────────┐\n"
+    text += "│ День│ Имя                        │ ID      │\n"
+    text += "├─────┼────────────────────────────┼─────────┤\n"
     
-    text = "📊 *Панель администратора*\n\n"
-    text += f"👥 *Всего:* {len(users)}\n"
-    text += f"✅ *Активных:* {len(active)}\n"
-    text += f"🏆 *Завершили:* {len(completed)}\n\n"
+    for user in users:
+        user_id, username, first_name, day, completed, _ = user
+        name = (first_name or username or str(user_id))[:24]
+        status = "✅" if completed == 1 else "📝"
+        text += f"│ {status} {day:2} │ {name:<24} │ `{user_id}` │\n"
+    
+    text += "└─────┴────────────────────────────┴─────────┘\n\n"
     text += "*Доступные команды:*\n"
     text += "• `/admin_info ID` - информация о пользователе\n"
-    text += "• `/admin_reset ID` - сброс на день 1\n"
-    text += "• `/admin_force_reset ID` - полный сброс\n"
+    text += "• `/admin_reset ID` - полный сброс пользователя\n"
     text += "• `/admin_set_day ID день` - установить день\n"
-    text += "• `/admin_sync ID` - синхронизация\n\n"
-    text += "*Список активных пользователей:*\n"
-    
-    for user in active[:20]:
-        user_id, username, first_name, day, _, _ = user
-        name = first_name or username or str(user_id)
-        text += f"👤 {name} (ID: `{user_id}`) — День {day}\n"
-    
-    if len(active) > 20:
-        text += f"\n*... и еще {len(active) - 20} пользователей*"
+    text += "• `/admin_sync ID` - синхронизация\n"
+    text += "• `/stats` - статистика"
     
     await message.answer(text, parse_mode="Markdown")
 
@@ -1494,7 +1539,7 @@ async def admin_info(message: types.Message):
     
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("❌ *Использование:* `/admin_info user_id`\nПример: `/admin_info 123456789`", parse_mode="Markdown")
+        await message.answer("❌ *Использование:* `/admin_info user_id`", parse_mode="Markdown")
         return
     
     try:
@@ -1507,7 +1552,7 @@ async def admin_info(message: types.Message):
         
         reports = db_get_user_reports(user_id)
         
-        info_text = f"📊 *Информация о пользователе*\n\n"
+        info_text = f"📊 *ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ*\n\n"
         info_text += f"👤 *ID:* `{user[0]}`\n"
         info_text += f"📝 *Имя:* {user[2] or 'Не указано'}\n"
         info_text += f"🔖 *Username:* @{user[1] if user[1] else 'Не указан'}\n"
@@ -1517,11 +1562,11 @@ async def admin_info(message: types.Message):
         info_text += f"📝 *Последний отчет:* {user[6].split('T')[0] if user[6] else 'Нет'}\n\n"
         
         if reports:
-            info_text += f"📋 *Отчеты по дням:*\n"
-            for report in reports[-10:]:
+            info_text += f"📋 *ОТЧЕТЫ ПО ДНЯМ:*\n"
+            for report in reports:
                 day, status, date = report
                 date_short = date.split('T')[0] if date else 'Неизвестно'
-                info_text += f"День {day}: {status} ({date_short})\n"
+                info_text += f"• День {day}: {status} ({date_short})\n"
         else:
             info_text += f"📋 *Нет ни одного отчета*"
         
@@ -1538,7 +1583,7 @@ async def admin_reset_user(message: types.Message):
     
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("❌ *Использование:* `/admin_reset user_id`\nПример: `/admin_reset 123456789`", parse_mode="Markdown")
+        await message.answer("❌ *Использование:* `/admin_reset user_id`", parse_mode="Markdown")
         return
     
     try:
@@ -1551,38 +1596,7 @@ async def admin_reset_user(message: types.Message):
         
         db_reset_user(user_id)
         
-        await message.answer(f"✅ *Прогресс пользователя сброшен*\n\n👤 ID: {user_id}\n📝 Имя: {user[2] or user[1] or 'Не указано'}\n📊 Был на дне: {user[4]}\n🔄 Сброшен на день: 1", parse_mode="Markdown")
-        
-        try:
-            await bot.send_message(user_id, "🔄 *Администратор сбросил ваш прогресс в марафоне!*\n\nТеперь вы можете начать марафон заново. Нажмите /start для начала.", parse_mode="Markdown")
-        except:
-            pass
-            
-    except ValueError:
-        await message.answer("❌ Неверный ID пользователя.")
-
-@dp.message(Command("admin_force_reset"))
-async def admin_force_reset_user(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ У вас нет доступа к этой команде.")
-        return
-    
-    args = message.text.split()
-    if len(args) < 2:
-        await message.answer("❌ *Использование:* `/admin_force_reset user_id`\nПример: `/admin_force_reset 123456789`", parse_mode="Markdown")
-        return
-    
-    try:
-        user_id = int(args[1])
-        user = db_get_user(user_id)
-        
-        if not user:
-            await message.answer(f"❌ Пользователь с ID {user_id} не найден.")
-            return
-        
-        db_reset_user(user_id)
-        
-        await message.answer(f"✅ *Принудительный полный сброс выполнен*\n\n👤 ID: {user_id}\n🔄 Все данные очищены, пользователь сброшен на день 1", parse_mode="Markdown")
+        await message.answer(f"✅ *Пользователь полностью сброшен*\n\n👤 ID: {user_id}\n📝 Имя: {user[2] or user[1] or 'Не указано'}\n🔄 Все данные удалены, пользователь сброшен на день 1", parse_mode="Markdown")
         
         try:
             await bot.send_message(user_id, "🔄 *Ваш прогресс был полностью сброшен администратором!*\n\nТеперь вы можете начать марафон заново. Нажмите /start для начала.", parse_mode="Markdown")
@@ -1600,7 +1614,7 @@ async def admin_set_user_day(message: types.Message):
     
     args = message.text.split()
     if len(args) < 3:
-        await message.answer("❌ *Использование:* `/admin_set_day user_id день`\nПример: `/admin_set_day 123456789 15`\n\nДень должен быть от 1 до 30", parse_mode="Markdown")
+        await message.answer("❌ *Использование:* `/admin_set_day user_id день`\n\nДень должен быть от 1 до 30", parse_mode="Markdown")
         return
     
     try:
@@ -1619,6 +1633,7 @@ async def admin_set_user_day(message: types.Message):
         old_day = user[4]
         db_update_user_day(user_id, new_day)
         
+        # Если пользователь был помечен как завершивший марафон, сбрасываем этот флаг
         if user[8] == 1:
             with DB_LOCK:
                 conn = get_db_connection()
@@ -1645,7 +1660,7 @@ async def admin_sync_user(message: types.Message):
     
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("❌ *Использование:* `/admin_sync user_id`\nПример: `/admin_sync 123456789`", parse_mode="Markdown")
+        await message.answer("❌ *Использование:* `/admin_sync user_id`", parse_mode="Markdown")
         return
     
     try:
@@ -1720,14 +1735,15 @@ async def stats_command(message: types.Message):
         day = user[3]
         day_counts[day] = day_counts.get(day, 0) + 1
     
-    text = "📈 *Расширенная статистика*\n\n"
-    text += f"👥 Всего пользователей: {len(users)}\n"
-    text += f"✅ Активных: {len(active)}\n"
-    text += f"🏆 Завершили: {len(completed)}\n\n"
-    text += "*Распределение по дням:*\n"
+    text = "📈 *РАСШИРЕННАЯ СТАТИСТИКА*\n\n"
+    text += f"👥 *Всего пользователей:* {len(users)}\n"
+    text += f"✅ *Активных:* {len(active)}\n"
+    text += f"🏆 *Завершили марафон:* {len(completed)}\n\n"
     
-    for day in sorted(day_counts.keys()):
-        text += f"День {day}: {day_counts[day]} пользователей\n"
+    if day_counts:
+        text += "*📊 Распределение по дням:*\n"
+        for day in sorted(day_counts.keys()):
+            text += f"• День {day}: {day_counts[day]} пользователей\n"
     
     await message.answer(text, parse_mode="Markdown")
 
@@ -1826,8 +1842,7 @@ async def set_commands():
     admin_commands = [
         BotCommand(command="admin", description="Админ-панель"),
         BotCommand(command="admin_info", description="Информация о пользователе"),
-        BotCommand(command="admin_reset", description="Сброс пользователя"),
-        BotCommand(command="admin_force_reset", description="Полный сброс"),
+        BotCommand(command="admin_reset", description="Полный сброс пользователя"),
         BotCommand(command="admin_set_day", description="Установить день"),
         BotCommand(command="admin_sync", description="Синхронизация"),
         BotCommand(command="stats", description="Статистика")
