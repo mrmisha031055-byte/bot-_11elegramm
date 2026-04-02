@@ -1,6 +1,6 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 9.4 - ИСПРАВЛЕННЫЕ АДМИН-КОМАНДЫ И УПРАВЛЕНИЕ СООБЩЕНИЯМИ
+Версия: 10.0 - ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ
 """
 
 import asyncio
@@ -39,7 +39,6 @@ TASKS_RELEASE_MINUTE = 59
 PREVIEW_BUTTON_HOUR = 18
 PREVIEW_BUTTON_MINUTE = 30
 
-# Время авто-удаления временных сообщений (секунд)
 AUTO_DELETE_TIME = 10
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -230,7 +229,6 @@ def get_avg_score(reports: list) -> float:
     return total / len(reports)
 
 def escape_markdown(text: str) -> str:
-    """Экранирует спецсимволы для Markdown"""
     if not text:
         return text
     chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
@@ -239,7 +237,6 @@ def escape_markdown(text: str) -> str:
     return text
 
 async def delete_message_after_delay(message: types.Message, delay: int = AUTO_DELETE_TIME):
-    """Удаляет сообщение через указанное количество секунд"""
     await asyncio.sleep(delay)
     try:
         await message.delete()
@@ -247,7 +244,9 @@ async def delete_message_after_delay(message: types.Message, delay: int = AUTO_D
         pass
 
 # ==================== ХРАНИЛИЩА СООБЩЕНИЙ ====================
-user_task_messages: Dict[int, int] = {}  # user_id -> message_id (последнее сообщение с задачами)
+user_task_messages: Dict[int, int] = {}
+active_previews: Dict[int, int] = {}
+waiting_for_problem: Dict[int, bool] = {}
 
 # ==================== КОНТЕНТ (ТЕКСТЫ) ====================
 START_MESSAGE = """
@@ -907,25 +906,18 @@ DAILY_TASKS[30] = {
 
 # ==================== КНОПКИ ====================
 def get_start_keyboard():
-    """Клавиатура для нового пользователя (только кнопка Получить информацию)"""
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📋 Получить информацию")]
-        ],
+        keyboard=[[KeyboardButton(text="📋 Получить информацию")]],
         resize_keyboard=True
     )
 
 def get_ready_keyboard():
-    """Клавиатура после получения информации (кнопка Я готов)"""
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="✅ Я ГОТОВ")]
-        ],
+        keyboard=[[KeyboardButton(text="✅ Я ГОТОВ")]],
         resize_keyboard=True
     )
 
 def get_main_menu_keyboard():
-    """Главное меню для активных участников"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📊 МОЙ СТАТУС"), KeyboardButton(text="📅 ЗАДАЧИ НА ЗАВТРА")],
@@ -975,25 +967,18 @@ def get_report_keyboard(day: int):
 
 def get_hide_preview_keyboard():
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Скрыть предпросмотр", callback_data="hide_preview")]
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Скрыть предпросмотр", callback_data="hide_preview")]]
     )
 
 def get_cancel_keyboard():
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_report")]
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_report")]]
     )
 
 # ==================== БОТ ====================
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-
-active_previews = {}
-waiting_for_problem = {}
 
 # ==================== ОСНОВНЫЕ ОБРАБОТЧИКИ ====================
 
@@ -1033,7 +1018,6 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command("my_status"))
 async def my_status_command(message: types.Message):
-    """Команда /my_status - показывает статус пользователя"""
     user_id = message.from_user.id
     user_data = db_get_user(user_id)
     
@@ -1205,20 +1189,30 @@ async def show_next_day_tasks(message: types.Message):
     
     next_day = current_day + 1
     
-    # Проверяем, отчитался ли пользователь за текущий день
-    has_report_today = db_get_report_status(user_id, current_day)
+    # Ключевое исправление: проверяем отчет за ПРЕДЫДУЩИЙ день
+    # Чтобы увидеть задачи на день 2, нужно отчитаться за день 1
+    previous_day = current_day - 1
+    has_report_previous = db_get_report_status(user_id, previous_day) if previous_day >= 1 else False
     
     now = datetime.now(MSK_TZ)
     is_after_1830 = now.hour >= PREVIEW_BUTTON_HOUR and now.minute >= PREVIEW_BUTTON_MINUTE
     
-    if not has_report_today and not is_after_1830:
+    # Для дня 1: проверяем отчет за день 1
+    if current_day == 1:
+        has_report_required = db_get_report_status(user_id, 1)
+        required_day = 1
+    else:
+        has_report_required = has_report_previous
+        required_day = previous_day
+    
+    if not has_report_required and not is_after_1830:
         await message.answer(
             f"🔒 *Предпросмотр задач на {next_day} день пока недоступен*\n\n"
             f"📋 *Условия для появления кнопки:*\n"
-            f"{'✅ ' if has_report_today else '❌ '}Отчитаться за {current_day} день\n"
+            f"{'✅ ' if has_report_required else '❌ '}Отчитаться за {required_day} день\n"
             f"{'✅ ' if is_after_1830 else '❌ '}Наступление 18:30 по МСК\n\n"
             f"*Твой текущий день:* {current_day}\n"
-            f"*Отчет за сегодня:* {'✅ Есть' if has_report_today else '❌ Нет'}\n"
+            f"*Отчет за {required_day} день:* {'✅ Есть' if has_report_required else '❌ Нет'}\n"
             f"*Текущее время:* {now.strftime('%H:%M')} МСК",
             parse_mode="Markdown"
         )
@@ -1267,10 +1261,9 @@ async def show_today_tasks(message: types.Message):
         await message.answer("🎉 *Ты уже завершил марафон!*", parse_mode="Markdown")
         return
     
-    # Проверяем, отчитался ли пользователь за сегодня
     has_report = db_get_report_status(user_id, current_day)
     
-    # Удаляем предыдущее сообщение с задачами, если оно есть
+    # Удаляем предыдущее сообщение с задачами
     if user_id in user_task_messages:
         try:
             await bot.delete_message(user_id, user_task_messages[user_id])
@@ -1285,7 +1278,7 @@ async def show_today_tasks(message: types.Message):
         tasks_text += f"\n\n*ℹ️ Вы уже отчитались за {current_day} день.*\n\n"
         tasks_text += f"📅 Завтра (День {current_day + 1}) в 23:59 МСК вы получите новые задания.\n\n"
         tasks_text += f"А пока можете посмотреть, что ждёт вас завтра, нажав кнопку *«📅 ЗАДАЧИ НА ЗАВТРА»*."
-        sent_msg = await message.answer(tasks_text, parse_mode="Markdown")
+        await message.answer(tasks_text, parse_mode="Markdown")
     else:
         tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
         sent_msg = await message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(current_day))
@@ -1419,7 +1412,7 @@ async def process_report(callback: types.CallbackQuery):
     # Удаляем сообщение с кнопками
     await callback.message.delete()
     
-    # Удаляем сохраненное сообщение с задачами, если есть
+    # Удаляем сохраненное сообщение с задачами
     if user_id in user_task_messages:
         try:
             await bot.delete_message(user_id, user_task_messages[user_id])
@@ -1741,7 +1734,6 @@ async def stats_command(message: types.Message):
 # ==================== ФОНОВЫЕ ЗАДАЧИ ====================
 
 async def check_reminders():
-    """Напоминание о неотчете в 23:59 МСК"""
     last_check_date = None
     
     while True:
@@ -1762,22 +1754,13 @@ async def check_reminders():
                             if has_report:
                                 continue
                             
-                            await bot.send_message(
-                                user_id, 
-                                REMINDER_MESSAGE,
-                                parse_mode="Markdown"
-                            )
+                            await bot.send_message(user_id, REMINDER_MESSAGE, parse_mode="Markdown")
                             
                             day_tasks = DAILY_TASKS[current_day]
                             tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
                             tasks_text += f"\n\n*Выполни задачи и нажми одну из кнопок:*"
                             
-                            await bot.send_message(
-                                user_id, 
-                                tasks_text, 
-                                parse_mode="Markdown", 
-                                reply_markup=get_report_keyboard(current_day)
-                            )
+                            await bot.send_message(user_id, tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(current_day))
                             
                             logger.info(f"Напоминание отправлено пользователю {user_id} (день {current_day})")
                             
@@ -1791,7 +1774,6 @@ async def check_reminders():
             await asyncio.sleep(60)
 
 async def release_daily_tasks():
-    """Выдает задачи в 23:59 МСК всем, кто отчитался за предыдущий день"""
     last_release_date = None
     
     while True:
@@ -1819,12 +1801,7 @@ async def release_daily_tasks():
                                 tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
                                 tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
                                 
-                                await bot.send_message(
-                                    user_id, 
-                                    tasks_text, 
-                                    parse_mode="Markdown", 
-                                    reply_markup=get_report_keyboard(current_day)
-                                )
+                                await bot.send_message(user_id, tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(current_day))
                                 db_update_last_task_date(user_id)
                                 logger.info(f"✅ Задачи на день {current_day} выданы пользователю {user_id}")
                             else:
