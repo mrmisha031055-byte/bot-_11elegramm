@@ -1,6 +1,6 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 13.0 - ИСПРАВЛЕННЫЙ
+Версия: 13.0 - РАБОЧАЯ ДЛЯ BOT-HOST.RU
 """
 
 import asyncio
@@ -24,11 +24,12 @@ from aiogram.client.default import DefaultBotProperties
 import pytz
 
 # ==================== НАСТРОЙКИ ====================
-TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-ADMIN_ID = 8406317983
+# Токен берется из переменных окружения на bot-host.ru
+TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = 8406317983  # ЗАМЕНИТЕ НА ВАШ ID!
 
-if TOKEN == "YOUR_BOT_TOKEN_HERE":
-    raise ValueError("❌ Токен не найден!")
+if not TOKEN:
+    raise ValueError("❌ Токен не найден! Добавьте переменную окружения BOT_TOKEN")
 
 MSK_TZ = pytz.timezone('Europe/Moscow')
 
@@ -281,7 +282,9 @@ async def delete_previous_messages(user_id: int):
             await bot.delete_message(user_id, last_bot_message[user_id])
         except:
             pass
-        del last_bot_message[user_id]# ==================== КОНТЕНТ (ТЕКСТЫ) ====================
+        del last_bot_message[user_id]
+
+# ==================== КОНТЕНТ (ТЕКСТЫ) ====================
 START_MESSAGE = """
 🌟 *Привет! Это твой личный спутник на ближайшие 30 дней.*
 
@@ -554,7 +557,9 @@ FEEDBACK_MESSAGES = {
         "3-4/5": "🟡 *Сделал больше половины (3-4/5):*\n30 дней позади. Ты сделал это. Серьезно, ты молодец 💪",
         "0-2/5": "🔴 *Сделал мало или ничего (0-2/5):*\n30 дней прошло. Ты мог не начинать, но начал. Ты мог сдаться, но не сдался. Это и есть победа."
     }
-}# ==================== ЗАДАНИЯ ПО ДНЯМ ====================
+}
+
+# ==================== ЗАДАНИЯ ПО ДНЯМ ====================
 DAILY_TASKS = {}
 
 # День 1
@@ -933,7 +938,9 @@ DAILY_TASKS[30] = {
         "🏁 *5. ФИНАЛ*\nПоздравляю. Ты сделал это. Ты вошёл в 2% людей, которые доходят до конца. Ты не просто прочитал — ты прожил эти 30 дней.\n\nПоставь эту галочку. Ты изменился. Иди дальше. Я в тебя верю 🚀"
     ],
     "total": 5
-}# ==================== КНОПКИ ====================
+}
+
+# ==================== КНОПКИ ====================
 def get_start_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📋 Получить информацию")]],
@@ -1300,22 +1307,14 @@ async def show_today_tasks(message: types.Message):
             pass
         del user_task_messages[user_id]
     
-    # Определяем, какой день показывать
-    if has_report:
-        # Если отчитался - показываем задачи ТЕКУЩЕГО дня (за который уже есть отчет) БЕЗ кнопок
-        day_to_show = current_day
-    else:
-        # Если не отчитался - показываем задачи ТЕКУЩЕГО дня С кнопками
-        day_to_show = current_day
-    
-    day_tasks = DAILY_TASKS[day_to_show]
+    day_tasks = DAILY_TASKS[current_day]
     tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
     
     last_user_message[user_id] = message.message_id
     
     if has_report:
         # Уже отчитался - показываем задачи БЕЗ кнопок отчета
-        tasks_text += f"\n\n*ℹ️ Вы уже отчитались за {day_to_show} день.*\n\n"
+        tasks_text += f"\n\n*ℹ️ Вы уже отчитались за {current_day} день.*\n\n"
         tasks_text += f"📅 Завтра (День {current_day + 1}) в 23:59 МСК вы получите новые задания.\n\n"
         tasks_text += f"А пока можете посмотреть, что ждёт вас завтра, нажав кнопку *«📅 ЗАДАЧИ НА ЗАВТРА»*."
         sent_msg = await message.answer(tasks_text, parse_mode="Markdown")
@@ -1323,7 +1322,7 @@ async def show_today_tasks(message: types.Message):
     else:
         # Не отчитался - показываем задачи С кнопками отчета
         tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
-        sent_msg = await message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(day_to_show))
+        sent_msg = await message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(current_day))
         user_task_messages[user_id] = sent_msg.message_id
         last_bot_message[user_id] = sent_msg.message_id
 
