@@ -1,6 +1,6 @@
 """
 TELEGRAM БОТ ДЛЯ 30-ДНЕВНОГО МАРАФОНА
-Версия: 12.0 - ИСПРАВЛЕННЫЕ АДМИН-КОМАНДЫ
+Версия: 13.0 - ИСПРАВЛЕННЫЙ
 """
 
 import asyncio
@@ -68,7 +68,8 @@ def init_db():
             is_active INTEGER DEFAULT 1,
             completed_30 INTEGER DEFAULT 0,
             has_info_shown INTEGER DEFAULT 0,
-            has_started_marathon INTEGER DEFAULT 0
+            has_started_marathon INTEGER DEFAULT 0,
+            last_sent_day INTEGER DEFAULT 0
         )
     ''')
     cur.execute('''
@@ -92,8 +93,8 @@ def db_add_user(user_id: int, username: str, first_name: str):
     with DB_LOCK:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, start_date, current_day, has_info_shown, has_started_marathon) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (user_id, username or "", first_name or "", datetime.now(MSK_TZ).isoformat(), 1, 0, 0))
+        cur.execute("INSERT OR IGNORE INTO users (user_id, username, first_name, start_date, current_day, has_info_shown, has_started_marathon, last_sent_day) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (user_id, username or "", first_name or "", datetime.now(MSK_TZ).isoformat(), 1, 0, 0, 0))
         conn.commit()
         conn.close()
 
@@ -179,7 +180,7 @@ def db_reset_user(user_id: int):
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("DELETE FROM daily_reports WHERE user_id = ?", (user_id,))
-        cur.execute("UPDATE users SET current_day = 1, last_task_date = NULL, last_report_date = NULL, completed_30 = 0, is_active = 1, start_date = ?, has_info_shown = 0, has_started_marathon = 0 WHERE user_id = ?",
+        cur.execute("UPDATE users SET current_day = 1, last_task_date = NULL, last_report_date = NULL, completed_30 = 0, is_active = 1, start_date = ?, has_info_shown = 0, has_started_marathon = 0, last_sent_day = 0 WHERE user_id = ?",
                     (datetime.now(MSK_TZ).isoformat(), user_id))
         conn.commit()
         conn.close()
@@ -209,6 +210,23 @@ def db_set_started_marathon(user_id: int):
         cur.execute("UPDATE users SET has_started_marathon = 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
+
+def db_update_last_sent_day(user_id: int, day: int):
+    with DB_LOCK:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET last_sent_day = ? WHERE user_id = ?", (day, user_id))
+        conn.commit()
+        conn.close()
+
+def db_get_last_sent_day(user_id: int) -> int:
+    with DB_LOCK:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT last_sent_day FROM users WHERE user_id = ?", (user_id,))
+        result = cur.fetchone()
+        conn.close()
+        return result[0] if result else 0
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def get_progress_bar(current_day: int, total_days: int = 30, width: int = 20):
@@ -263,9 +281,7 @@ async def delete_previous_messages(user_id: int):
             await bot.delete_message(user_id, last_bot_message[user_id])
         except:
             pass
-        del last_bot_message[user_id]
-
-# ==================== КОНТЕНТ (ТЕКСТЫ) ====================
+        del last_bot_message[user_id]# ==================== КОНТЕНТ (ТЕКСТЫ) ====================
 START_MESSAGE = """
 🌟 *Привет! Это твой личный спутник на ближайшие 30 дней.*
 
@@ -538,9 +554,7 @@ FEEDBACK_MESSAGES = {
         "3-4/5": "🟡 *Сделал больше половины (3-4/5):*\n30 дней позади. Ты сделал это. Серьезно, ты молодец 💪",
         "0-2/5": "🔴 *Сделал мало или ничего (0-2/5):*\n30 дней прошло. Ты мог не начинать, но начал. Ты мог сдаться, но не сдался. Это и есть победа."
     }
-}
-
-# ==================== ЗАДАНИЯ ПО ДНЯМ ====================
+}# ==================== ЗАДАНИЯ ПО ДНЯМ ====================
 DAILY_TASKS = {}
 
 # День 1
@@ -919,9 +933,7 @@ DAILY_TASKS[30] = {
         "🏁 *5. ФИНАЛ*\nПоздравляю. Ты сделал это. Ты вошёл в 2% людей, которые доходят до конца. Ты не просто прочитал — ты прожил эти 30 дней.\n\nПоставь эту галочку. Ты изменился. Иди дальше. Я в тебя верю 🚀"
     ],
     "total": 5
-}
-
-# ==================== КНОПКИ ====================
+}# ==================== КНОПКИ ====================
 def get_start_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="📋 Получить информацию")]],
@@ -1288,14 +1300,22 @@ async def show_today_tasks(message: types.Message):
             pass
         del user_task_messages[user_id]
     
-    day_tasks = DAILY_TASKS[current_day]
+    # Определяем, какой день показывать
+    if has_report:
+        # Если отчитался - показываем задачи ТЕКУЩЕГО дня (за который уже есть отчет) БЕЗ кнопок
+        day_to_show = current_day
+    else:
+        # Если не отчитался - показываем задачи ТЕКУЩЕГО дня С кнопками
+        day_to_show = current_day
+    
+    day_tasks = DAILY_TASKS[day_to_show]
     tasks_text = f"*{day_tasks['title']}*\n\n" + "\n\n".join(day_tasks["tasks"])
     
     last_user_message[user_id] = message.message_id
     
     if has_report:
         # Уже отчитался - показываем задачи БЕЗ кнопок отчета
-        tasks_text += f"\n\n*ℹ️ Вы уже отчитались за {current_day} день.*\n\n"
+        tasks_text += f"\n\n*ℹ️ Вы уже отчитались за {day_to_show} день.*\n\n"
         tasks_text += f"📅 Завтра (День {current_day + 1}) в 23:59 МСК вы получите новые задания.\n\n"
         tasks_text += f"А пока можете посмотреть, что ждёт вас завтра, нажав кнопку *«📅 ЗАДАЧИ НА ЗАВТРА»*."
         sent_msg = await message.answer(tasks_text, parse_mode="Markdown")
@@ -1303,7 +1323,7 @@ async def show_today_tasks(message: types.Message):
     else:
         # Не отчитался - показываем задачи С кнопками отчета
         tasks_text += f"\n\n*Как выполнишь задачи, нажми одну из кнопок:*"
-        sent_msg = await message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(current_day))
+        sent_msg = await message.answer(tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(day_to_show))
         user_task_messages[user_id] = sent_msg.message_id
         last_bot_message[user_id] = sent_msg.message_id
 
@@ -1788,6 +1808,11 @@ async def release_daily_tasks():
                             if current_day == 1:
                                 continue
                             
+                            # Проверяем, не отправляли ли уже задачи на этот день
+                            last_sent = db_get_last_sent_day(user_id)
+                            if last_sent >= current_day:
+                                continue
+                            
                             previous_day = current_day - 1
                             has_report_previous = db_get_report_status(user_id, previous_day)
                             
@@ -1798,6 +1823,7 @@ async def release_daily_tasks():
                                 
                                 await bot.send_message(user_id, tasks_text, parse_mode="Markdown", reply_markup=get_report_keyboard(current_day))
                                 db_update_last_task_date(user_id)
+                                db_update_last_sent_day(user_id, current_day)
                                 logger.info(f"✅ Задачи на день {current_day} выданы пользователю {user_id}")
                             else:
                                 logger.info(f"⚠️ Пользователь {user_id} не отчитался за день {previous_day}, задачи на день {current_day} не выданы")
